@@ -6,7 +6,7 @@ on:
     - cron: '0 0 * * *'  # 每日UTC 0点（北京时间8点）执行
 
 env:
-  # 核心参数：应用名称（原fpk-napcatqq），统一修改此处即可
+  # 核心参数：应用名称
   APP_NAME: "fpk-zflie"
   # 应用显示名称（用于README）
   APP_DISPLAY_NAME: "ZFile"
@@ -61,31 +61,31 @@ jobs:
       - name: 4. 读取本地manifest版本号（鲁棒版，修复换行符问题）
         id: local_ver
         run: |
-            if [ -f "${{ env.APP_NAME }}/manifest" ]; then
-              # 强化清洗逻辑：依次移除引号、v前缀、换行符、回车符，最后清除首尾空格
-              LOCAL_VERSION=$(sed -n 's/^[[:space:]]*version[[:space:]]*[:=][[:space:]]*//p' "${{ env.APP_NAME }}/manifest" \
-                | tr -d '"' | tr -d "'" \
-                | sed 's/^v//' \
-                | tr -d '\n' \
-                | tr -d '\r' \
-                | sed 's/[[:space:]]*$//' \
-                | sed 's/^[[:space:]]*//')
-              # 移除单双引号
-              # 移除可能的v前缀
-              # 移除换行符
-              # 移除回车符（解决Windows换行问题）
-              # 清除末尾空格
-              # 清除开头空格
-              echo "本地manifest版本：[$LOCAL_VERSION]"  # 带边界符检查
-              echo "local_version=$LOCAL_VERSION" >> $GITHUB_OUTPUT
-            else
-              echo "❌ 未找到${{ env.APP_NAME }}/manifest，强制触发更新"
-              echo "local_version=0.0.0" >> $GITHUB_OUTPUT
-              mkdir -p "${{ env.APP_NAME }}"
-              echo "version: 0.0.0" > "${{ env.APP_NAME }}/manifest"
-              git add "${{ env.APP_NAME }}/manifest"
-              git commit -m "chore: 初始化${{ env.APP_NAME }}的manifest文件" || echo "无需要提交的变更"
-            fi
+          if [ -f "${{ env.APP_NAME }}/manifest" ]; then
+            # 强化清洗逻辑：依次移除引号、v前缀、换行符、回车符，最后清除首尾空格
+            LOCAL_VERSION=$(sed -n 's/^[[:space:]]*version[[:space:]]*[:=][[:space:]]*//p' "${{ env.APP_NAME }}/manifest" \
+              | tr -d '"' | tr -d "'" \
+              | sed 's/^v//' \
+              | tr -d '\n' \
+              | tr -d '\r' \
+              | sed 's/[[:space:]]*$//' \
+              | sed 's/^[[:space:]]*//')
+            # 移除单双引号
+            # 移除可能的v前缀
+            # 移除换行符
+            # 移除回车符（解决Windows换行问题）
+            # 清除末尾空格
+            # 清除开头空格
+            echo "本地manifest版本：[$LOCAL_VERSION]"  # 带边界符检查
+            echo "local_version=$LOCAL_VERSION" >> $GITHUB_OUTPUT
+          else
+            echo "❌ 未找到${{ env.APP_NAME }}/manifest，强制触发更新"
+            echo "local_version=0.0.0" >> $GITHUB_OUTPUT
+            mkdir -p "${{ env.APP_NAME }}"
+            echo "version: 0.0.0" > "${{ env.APP_NAME }}/manifest"
+            git add "${{ env.APP_NAME }}/manifest"
+            git commit -m "chore: 初始化${{ env.APP_NAME }}的manifest文件" || echo "无需要提交的变更"
+          fi
 
       # ===================== 核心逻辑：获取远程版本和哈希 =====================
       - name: 5. 从Docker Hub原始API获取最新版本号
@@ -221,7 +221,7 @@ jobs:
           chmod +x /usr/local/bin/fnpack
           echo "✅ fnpack安装完成：$(fnpack --version 2>&1 | head -n1)"
 
-      - name: 11. 执行fnpack打包
+      - name: 11. 执行fnpack打包（固定文件名为APP_NAME.fpk）
         if: steps.compare.outputs.need_update == 'true'
         id: build_fpk
         run: |
@@ -229,18 +229,19 @@ jobs:
           cd "${{ env.APP_NAME }}"
           fnpack build
           
+          # 查找生成的fpk文件（假设仅生成一个）
           FPK_FILE=$(find . -name "*.fpk" -type f | head -n1)
           [ -z "$FPK_FILE" ] && { echo "❌ 未生成${{ env.APP_NAME }}的fpk文件"; exit 1; }
           
-          VERSION="${{ steps.remote_ver.outputs.remote_version }}"
-          ARCH="Linux-AMD64"
-          FPK_VERSION_NAME="${{ env.APP_NAME }}-v${VERSION}-${ARCH}.fpk"
+          # 固定文件名：仅使用APP_NAME.fpk（不含版本和架构）
+          FPK_FIXED_NAME="${{ env.APP_NAME }}.fpk"
           mkdir -p /tmp/fpk_build
-          cp "$FPK_FILE" "/tmp/fpk_build/$FPK_VERSION_NAME"
+          # 复制并重命名为固定文件名
+          cp "$FPK_FILE" "/tmp/fpk_build/$FPK_FIXED_NAME"
           
-          echo "✅ 打包完成：/tmp/fpk_build/$FPK_VERSION_NAME"
-          echo "fpk_release_file=/tmp/fpk_build/$FPK_VERSION_NAME" >> $GITHUB_OUTPUT
-          echo "fpk_release_name=$FPK_VERSION_NAME" >> $GITHUB_OUTPUT
+          echo "✅ 打包完成：/tmp/fpk_build/$FPK_FIXED_NAME"
+          echo "fpk_release_file=/tmp/fpk_build/$FPK_FIXED_NAME" >> $GITHUB_OUTPUT
+          echo "fpk_release_name=$FPK_FIXED_NAME" >> $GITHUB_OUTPUT
 
       # ===================== 第四步：推送至FnDepot仓库 =====================
       - name: 12. 克隆FnDepot仓库
@@ -250,12 +251,14 @@ jobs:
           git clone "https://${{ secrets.FnDepot_PAT }}@github.com/moxyis/FnDepot.git" /tmp/FnDepot
           echo "✅ FnDepot仓库克隆完成"
 
-      - name: 13. 复制fpk文件到FnDepot
+      - name: 13. 复制fpk文件到FnDepot（保留固定文件名）
         if: steps.compare.outputs.need_update == 'true'
         run: |
+          # 确保目标目录存在
           mkdir -p "/tmp/FnDepot/${{ env.APP_NAME }}"
+          # 复制固定文件名的fpk文件（文件名：APP_NAME.fpk）
           cp "${{ steps.build_fpk.outputs.fpk_release_file }}" "/tmp/FnDepot/${{ env.APP_NAME }}/"
-          echo "✅ ${{ env.APP_NAME }}的fpk文件已复制到FnDepot"
+          echo "✅ 已复制${{ steps.build_fpk.outputs.fpk_release_name }}到FnDepot"
 
       - name: 14. 更新FnDepot的fnpack.json
         if: steps.compare.outputs.need_update == 'true'
