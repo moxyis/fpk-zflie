@@ -61,25 +61,31 @@ jobs:
       - name: 4. 读取本地manifest版本号（鲁棒版，修复换行符问题）
         id: local_ver
         run: |
-          if [ -f "${{ env.APP_NAME }}/manifest" ]; then
-            # 强化清洗逻辑：依次移除引号、v前缀、换行符、回车符，最后清除首尾空格
-            LOCAL_VERSION=$(sed -n 's/^[[:space:]]*version[[:space:]]*[:=][[:space:]]*//p' "${{ env.APP_NAME }}/manifest" \
-              | tr -d '"' | tr -d "'" \  # 移除单双引号
-              | sed 's/^v//' \          # 移除可能的v前缀
-              | tr -d '\n' \            # 移除换行符
-              | tr -d '\r' \            # 移除回车符（解决Windows换行问题）
-              | sed 's/[[:space:]]*$//' \  # 清除末尾空格
-              | sed 's/^[[:space:]]*//')   # 清除开头空格
-            echo "本地manifest版本：[$LOCAL_VERSION]"  # 带边界符检查
-            echo "local_version=$LOCAL_VERSION" >> $GITHUB_OUTPUT
-          else
-            echo "❌ 未找到${{ env.APP_NAME }}/manifest，强制触发更新"
-            echo "local_version=0.0.0" >> $GITHUB_OUTPUT
-            mkdir -p "${{ env.APP_NAME }}"
-            echo "version: 0.0.0" > "${{ env.APP_NAME }}/manifest"
-            git add "${{ env.APP_NAME }}/manifest"
-            git commit -m "chore: 初始化${{ env.APP_NAME }}的manifest文件" || echo "无需要提交的变更"
-          fi
+            if [ -f "${{ env.APP_NAME }}/manifest" ]; then
+              # 强化清洗逻辑：依次移除引号、v前缀、换行符、回车符，最后清除首尾空格
+              LOCAL_VERSION=$(sed -n 's/^[[:space:]]*version[[:space:]]*[:=][[:space:]]*//p' "${{ env.APP_NAME }}/manifest" \
+                | tr -d '"' | tr -d "'" \
+                | sed 's/^v//' \
+                | tr -d '\n' \
+                | tr -d '\r' \
+                | sed 's/[[:space:]]*$//' \
+                | sed 's/^[[:space:]]*//')
+              # 移除单双引号
+              # 移除可能的v前缀
+              # 移除换行符
+              # 移除回车符（解决Windows换行问题）
+              # 清除末尾空格
+              # 清除开头空格
+              echo "本地manifest版本：[$LOCAL_VERSION]"  # 带边界符检查
+              echo "local_version=$LOCAL_VERSION" >> $GITHUB_OUTPUT
+            else
+              echo "❌ 未找到${{ env.APP_NAME }}/manifest，强制触发更新"
+              echo "local_version=0.0.0" >> $GITHUB_OUTPUT
+              mkdir -p "${{ env.APP_NAME }}"
+              echo "version: 0.0.0" > "${{ env.APP_NAME }}/manifest"
+              git add "${{ env.APP_NAME }}/manifest"
+              git commit -m "chore: 初始化${{ env.APP_NAME }}的manifest文件" || echo "无需要提交的变更"
+            fi
 
       # ===================== 核心逻辑：获取远程版本和哈希 =====================
       - name: 5. 从Docker Hub原始API获取最新版本号
