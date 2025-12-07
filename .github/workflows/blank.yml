@@ -99,7 +99,7 @@ jobs:
           # 提取有效标签（排除测试版，保留vX.Y.Z格式）
           ALL_VALID_TAGS=$(echo "$RAW_RESPONSE" | jq -r '.results[] | .name' \
             | grep -v -E '^latest$|^dev$|^beta$|^alpha$|^nightly$|^test$' \
-            | grep -E '^v[0-9]+\.[0-9]+(\.[0-9]+)?$')
+            | grep -E '^[0-9]+\.[0-9]+(\.[0-9]+)?$')
           
           # 无有效标签则终止
           if [ -z "$ALL_VALID_TAGS" ]; then
