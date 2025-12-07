@@ -6,64 +6,71 @@ on:
     - cron: '0 0 * * *'  # 每日UTC 0点（北京时间8点）执行
 
 env:
+  # 核心参数：应用名称（原fpk-napcatqq），统一修改此处即可
   APP_NAME: "fpk-zflie"
+  # 应用显示名称（用于README）
   APP_DISPLAY_NAME: "ZFile"
+  # 来源仓库地址
   APP_SOURCE_REPO: "zhaojun1998/https://github.com/zfile-dev/zfile"
+  # 应用类型
   APP_TYPE: "Docker"
+  # Docker镜像仓库
   DOCKER_REPO: "zhaojun1998/zfile"
 
 jobs:
   build:
     runs-on: ubuntu-latest
     permissions:
-      contents: write
+      contents: write  # 授予写入仓库/创建Release权限
       pull-requests: read
-    timeout-minutes: 15
+    timeout-minutes: 15  # 超时保护（打包流程耗时较长）
     defaults:
       run:
         shell: bash
         working-directory: .
     steps:
-      # ===================== 环境准备 =====================
-      - name: 1. 检出代码
+      # ===================== 第一步：环境准备 =====================
+      - name: 1. 检出当前仓库代码（带完整历史）
         uses: actions/checkout@v4
         with:
-          fetch-depth: 0
+          fetch-depth: 0  # 完整检出历史
           token: ${{ secrets.GITHUB_TOKEN }}
 
-      - name: 2. 安装依赖
+      - name: 2. 安装基础依赖（增强版）
         run: |
-          sudo apt update && sudo apt install -y jq curl sed skopeo coreutils findutils
+          sudo apt update && sudo apt install -y \
+            jq curl sed skopeo coreutils findutils  # 补充基础工具
+          # 验证依赖安装
           for tool in jq curl sed skopeo; do
             if ! command -v $tool &>/dev/null; then
               echo "❌ $tool 安装失败"
               exit 1
             fi
           done
-          echo "✅ 依赖安装完成"
+          echo "✅ 所有基础依赖安装完成"
 
-      - name: 3. 配置Git身份
+      - name: 3. 配置Git全局身份（跨仓库通用）
         run: |
           git config --global user.name "github-actions[bot]"
           git config --global user.email "github-actions[bot]@users.noreply.github.com"
-          git config --global core.autocrlf false
-          git config --global pull.rebase false
-          echo "✅ Git配置完成"
+          git config --global core.autocrlf false  # 避免换行符问题
+          git config --global pull.rebase false     # 避免rebase冲突
+          echo "✅ Git身份配置完成"
 
-      # ===================== 版本比对核心逻辑 =====================
-      - name: 4. 读取本地manifest版本号（强化换行符处理）
+      # ===================== 第二步：版本比对（核心前置） =====================
+      - name: 4. 读取本地manifest版本号（鲁棒版，修复换行符问题）
         id: local_ver
         run: |
           if [ -f "${{ env.APP_NAME }}/manifest" ]; then
-            # 强化处理：使用dos2unix移除Windows换行符，再彻底清理空白字符
+            # 强化清洗逻辑：依次移除引号、v前缀、换行符、回车符，最后清除首尾空格
             LOCAL_VERSION=$(sed -n 's/^[[:space:]]*version[[:space:]]*[:=][[:space:]]*//p' "${{ env.APP_NAME }}/manifest" \
-              | tr -d '"' | tr -d "'" \
-              | sed 's/^v//' \
-              | dos2unix \  # 移除可能的\r换行符
-              | tr -d '\n' \  # 移除所有换行符
-              | tr -d '\r' \  # 单独处理回车符
-              | xargs)  # 清除首尾空格
-            echo "本地manifest版本：[$LOCAL_VERSION]"
+              | tr -d '"' | tr -d "'" \  # 移除单双引号
+              | sed 's/^v//' \          # 移除可能的v前缀
+              | tr -d '\n' \            # 移除换行符
+              | tr -d '\r' \            # 移除回车符（解决Windows换行问题）
+              | sed 's/[[:space:]]*$//' \  # 清除末尾空格
+              | sed 's/^[[:space:]]*//')   # 清除开头空格
+            echo "本地manifest版本：[$LOCAL_VERSION]"  # 带边界符检查
             echo "local_version=$LOCAL_VERSION" >> $GITHUB_OUTPUT
           else
             echo "❌ 未找到${{ env.APP_NAME }}/manifest，强制触发更新"
@@ -74,37 +81,52 @@ jobs:
             git commit -m "chore: 初始化${{ env.APP_NAME }}的manifest文件" || echo "无需要提交的变更"
           fi
 
-      - name: 5. 获取远程版本和哈希
+      # ===================== 核心逻辑：获取远程版本和哈希 =====================
+      - name: 5. 从Docker Hub原始API获取最新版本号
         id: remote_ver
         run: |
           set -euo pipefail
+          
+          # 使用环境变量DOCKER_REPO替代硬编码的镜像仓库
           API_URL="https://registry.hub.docker.com/v2/repositories/${{ env.DOCKER_REPO }}/tags"
           RAW_RESPONSE=$(curl -s "$API_URL")
+          REMOTE_VERSION=""
+          REMOTE_DIGEST=""
+          TOTAL_TAGS=0
           
+          echo "📡 从API提取${{ env.APP_NAME }}版本信息..."
+          
+          # 统计总标签数
+          TOTAL_TAGS=$(echo "$RAW_RESPONSE" | jq -r '.count // 0')
+          
+          # 提取有效标签（排除测试版，保留vX.Y.Z格式）
           ALL_VALID_TAGS=$(echo "$RAW_RESPONSE" | jq -r '.results[] | .name' \
             | grep -v -E '^latest$|^dev$|^beta$|^alpha$|^nightly$|^test$' \
             | grep -E '^[0-9]+\.[0-9]+(\.[0-9]+)?$')
           
+          # 无有效标签则终止
           if [ -z "$ALL_VALID_TAGS" ]; then
-            echo "❌ 未找到有效标签"
+            echo "❌ 未找到${{ env.APP_NAME }}的有效版本标签，终止流程"
             exit 1
           fi
           
-          # 版本排序
+          # 版本号数字排序（补全X.Y为X.Y.0）
           SORTED_TAGS=$(echo "$ALL_VALID_TAGS" | while read -r tag; do
-            ver=$tag
+            ver=${tag#v}
             [[ "$ver" =~ ^[0-9]+\.[0-9]+$ ]] && ver="$ver.0"
             echo "$ver|$tag"
           done | sort -t. -k1,1n -k2,2n -k3,3n)
           
+          # 取最新版本标签
           LATEST_TAG=$(echo "$SORTED_TAGS" | tail -n1 | cut -d'|' -f2)
-          REMOTE_VERSION=$LATEST_TAG
+          REMOTE_VERSION="${LATEST_TAG#v}"
           
-          # 获取哈希
+          # 提取镜像哈希（处理隐藏字符）
           REMOTE_DIGEST=$(echo "$RAW_RESPONSE" | jq -r --arg tag "$LATEST_TAG" \
             '.results[] | select(.name == $tag) | .images[0].digest // ""' \
             | tr -d '\n' | xargs)
           
+          # 哈希兜底
           if [ -z "$REMOTE_DIGEST" ] || [ "$REMOTE_DIGEST" = "null" ]; then
             REMOTE_DIGEST=$(skopeo inspect --format '{{.Digest}}' \
               docker://${{ env.DOCKER_REPO }}:${LATEST_TAG} 2>/dev/null \
@@ -114,19 +136,20 @@ jobs:
           echo "✅ 最新版本：[$REMOTE_VERSION]，哈希：[${REMOTE_DIGEST:0:12}...]"
           echo "remote_version=$REMOTE_VERSION" >> $GITHUB_OUTPUT
           echo "remote_digest=$REMOTE_DIGEST" >> $GITHUB_OUTPUT
+          echo "total_tags=$TOTAL_TAGS" >> $GITHUB_OUTPUT
 
-      - name: 6. 读取本地哈希
+      - name: 6. 读取本地哈希记录（修复隐藏字符）
         id: local_digest
         run: |
           set -euo pipefail
           DIGEST_FILE="docker-image-digest.txt"
           
           [ ! -f "$DIGEST_FILE" ] && touch "$DIGEST_FILE"
-          LOCAL_DIGEST=$(cat "$DIGEST_FILE" | tr -d '\n' | tr -d '\r' | xargs || echo "")
+          LOCAL_DIGEST=$(cat "$DIGEST_FILE" | tr -d '\n' | xargs || echo "")
           echo "本地哈希：[${LOCAL_DIGEST:0:12}...]"
           echo "local_digest=$LOCAL_DIGEST" >> $GITHUB_OUTPUT
 
-      - name: 7. 版本+哈希比对（优化判断逻辑）
+      - name: 7. 版本+哈希比对（精确判断）
         id: compare
         run: |
           set -euo pipefail
@@ -135,23 +158,23 @@ jobs:
           LOCAL_DIG="${{ steps.local_digest.outputs.local_digest }}"
           REMOTE_DIG="${{ steps.remote_ver.outputs.remote_digest }}"
           
-          echo -e "\n🔍 版本比对："
-          echo "本地版本: [$LOCAL_VER] (长度: ${#LOCAL_VER})"
-          echo "远程版本: [$REMOTE_VER] (长度: ${#REMOTE_VER})"
-          echo "本地哈希: [$LOCAL_DIG]"
-          echo "远程哈希: [$REMOTE_DIG]"
+          echo -e "\n🔍 原始值比对（带边界符）："
+          echo "LOCAL_VER: [$LOCAL_VER]"
+          echo "REMOTE_VER: [$REMOTE_VER]"
+          echo "LOCAL_DIG: [$LOCAL_DIG]"
+          echo "REMOTE_DIG: [$REMOTE_DIG]"
           
-          # 严格匹配（包括空哈希场景）
-          if [ "$LOCAL_VER" != "$REMOTE_VER" ] || [ "$LOCAL_DIG" != "$REMOTE_DIG" ]; then
-            echo "✅ 需要更新（版本或哈希不匹配）"
+          # 精确判断逻辑
+          if [ "$LOCAL_VER" != "$REMOTE_VER" ] || { [ "$LOCAL_VER" = "$REMOTE_VER" ] && [ "$LOCAL_DIG" != "$REMOTE_DIG" ] && [ -n "$LOCAL_DIG" ] && [ -n "$REMOTE_DIG" ]; }; then
+            echo "✅ 需要更新（版本或哈希不一致）"
             echo "need_update=true" >> $GITHUB_OUTPUT
           else
             echo "✅ 无需更新（版本和哈希完全一致）"
             echo "need_update=false" >> $GITHUB_OUTPUT
           fi
 
-      # ===================== 更新与推送流程 =====================
-      - name: 8. 更新manifest和哈希文件
+      # ===================== 第三步：仅需更新时执行 =====================
+      - name: 8. 更新manifest+哈希记录
         if: steps.compare.outputs.need_update == 'true'
         run: |
           set -euo pipefail
@@ -160,16 +183,170 @@ jobs:
           NEW_VER="${{ steps.remote_ver.outputs.remote_version }}"
           NEW_DIG="${{ steps.remote_ver.outputs.remote_digest }}"
           
-          # 更新版本号（确保无换行）
+          # 更新版本号（避免多余换行）
           sed -i -E "s/(^[[:space:]]*version[[:space:]]*[:=][[:space:]]*)([\"']?).*([\"']?)/\1\2${NEW_VER}\3/" "$MANIFEST_PATH"
           
-          # 写入哈希（确保无换行）
+          # 更新哈希（echo -n 避免换行）
           echo -n "$NEW_DIG" > "$DIGEST_FILE"
           
-          # 验证更新结果
-          echo -e "\n✅ 更新验证："
+          # 验证更新
+          echo -e "\n✅ 更新结果验证："
           echo "manifest版本: [$(grep -i version "$MANIFEST_PATH" | sed 's/.*=//' | tr -d ' "' | xargs)]"
-          echo "哈希文件内容: [$(cat "$DIGEST_FILE")]"
+          echo "哈希记录: [$(cat "$DIGEST_FILE")]"
           git add "$MANIFEST_PATH" "$DIGEST_FILE"
 
-      # 后续步骤（9-18）保持不变，此处省略...
+      - name: 9. 提交并推送变更
+        if: steps.compare.outputs.need_update == 'true'
+        run: |
+          set -euo pipefail
+          COMMIT_MSG="chore: 更新${{ env.APP_NAME }}至版本${{ steps.remote_ver.outputs.remote_version }}"
+          
+          git commit -m "$COMMIT_MSG" || echo "✅ 无实际变更需提交"
+          git push origin HEAD:${{ github.ref_name }} || (
+            git pull --rebase origin ${{ github.ref_name }} && git push origin HEAD:${{ github.ref_name }}
+          )
+          echo "✅ 变更已推送至仓库"
+
+      - name: 10. 下载并安装fnpack
+        if: steps.compare.outputs.need_update == 'true'
+        run: |
+          curl -SL --retry 3 --connect-timeout 10 -o /usr/local/bin/fnpack \
+            "https://static2.fnnas.com/fnpack/fnpack-1.0.4-linux-amd64"
+          chmod +x /usr/local/bin/fnpack
+          echo "✅ fnpack安装完成：$(fnpack --version 2>&1 | head -n1)"
+
+      - name: 11. 执行fnpack打包
+        if: steps.compare.outputs.need_update == 'true'
+        id: build_fpk
+        run: |
+          set -euo pipefail
+          cd "${{ env.APP_NAME }}"
+          fnpack build
+          
+          FPK_FILE=$(find . -name "*.fpk" -type f | head -n1)
+          [ -z "$FPK_FILE" ] && { echo "❌ 未生成${{ env.APP_NAME }}的fpk文件"; exit 1; }
+          
+          VERSION="${{ steps.remote_ver.outputs.remote_version }}"
+          ARCH="Linux-AMD64"
+          FPK_VERSION_NAME="${{ env.APP_NAME }}-v${VERSION}-${ARCH}.fpk"
+          mkdir -p /tmp/fpk_build
+          cp "$FPK_FILE" "/tmp/fpk_build/$FPK_VERSION_NAME"
+          
+          echo "✅ 打包完成：/tmp/fpk_build/$FPK_VERSION_NAME"
+          echo "fpk_release_file=/tmp/fpk_build/$FPK_VERSION_NAME" >> $GITHUB_OUTPUT
+          echo "fpk_release_name=$FPK_VERSION_NAME" >> $GITHUB_OUTPUT
+
+      # ===================== 第四步：推送至FnDepot仓库 =====================
+      - name: 12. 克隆FnDepot仓库
+        if: steps.compare.outputs.need_update == 'true'
+        run: |
+          rm -rf /tmp/FnDepot
+          git clone "https://${{ secrets.FnDepot_PAT }}@github.com/moxyis/FnDepot.git" /tmp/FnDepot
+          echo "✅ FnDepot仓库克隆完成"
+
+      - name: 13. 复制fpk文件到FnDepot
+        if: steps.compare.outputs.need_update == 'true'
+        run: |
+          mkdir -p "/tmp/FnDepot/${{ env.APP_NAME }}"
+          cp "${{ steps.build_fpk.outputs.fpk_release_file }}" "/tmp/FnDepot/${{ env.APP_NAME }}/"
+          echo "✅ ${{ env.APP_NAME }}的fpk文件已复制到FnDepot"
+
+      - name: 14. 更新FnDepot的fnpack.json
+        if: steps.compare.outputs.need_update == 'true'
+        run: |
+          set -euo pipefail
+          VERSION="${{ steps.remote_ver.outputs.remote_version }}"
+          JSON_FILE="/tmp/FnDepot/fnpack.json"
+          
+          # 初始化JSON文件（若不存在）
+          [ ! -f "$JSON_FILE" ] && echo '{}' > "$JSON_FILE"
+          
+          # 更新版本号（确保结构正确）
+          jq --arg app "${{ env.APP_NAME }}" --arg ver "$VERSION" \
+            '.[$app] = (.[$app] // {}) | .[$app].version = $ver' \
+            "$JSON_FILE" > "$JSON_FILE.tmp" && mv "$JSON_FILE.tmp" "$JSON_FILE"
+          
+          echo "✅ fnpack.json更新完成：$(cat "$JSON_FILE")"
+
+      - name: 15. 更新FnDepot的README.md（修复匹配规则）
+        if: steps.compare.outputs.need_update == 'true'
+        run: |
+          set -euo pipefail
+          VERSION="${{ steps.remote_ver.outputs.remote_version }}"
+          README_FILE="/tmp/FnDepot/README.md"
+          
+          # 初始化README（若不存在）
+          if [ ! -f "$README_FILE" ]; then
+            echo "# FnDepot" > "$README_FILE"
+            echo "" >> "$README_FILE"
+            echo "| 应用名称       | 版本号   | 来源仓库                                  | 类型   |" >> "$README_FILE"
+            echo "|----------------|----------|-------------------------------------------|--------|" >> "$README_FILE"
+            # 使用环境变量填充应用信息
+            echo "| **${{ env.APP_DISPLAY_NAME }}**   | $VERSION | ${{ env.APP_SOURCE_REPO }} | ${{ env.APP_TYPE }} |" >> "$README_FILE"
+            echo "" >> "$README_FILE"
+            echo "自动更新说明：每日同步最新版本" >> "$README_FILE"
+            echo "✅ 初始化README.md完成"
+          else
+            # 修复匹配规则：使用APP_DISPLAY_NAME精确匹配
+            sed -i -E \
+              's/(^\|.*\*\*${{ env.APP_DISPLAY_NAME }}\*\*.*\|[[:space:]]*)[0-9.]+([[:space:]]*\|.*$)/\1'"${VERSION}"'\2/' \
+              "$README_FILE"
+            echo "✅ README.md版本号已更新为：$VERSION"
+          fi
+          
+          # 验证更新结果
+          echo -e "\n📄 README.md关键内容："
+          grep -A 1 "${{ env.APP_DISPLAY_NAME }}" "$README_FILE"
+
+      - name: 16. 提交并推送FnDepot变更
+        if: steps.compare.outputs.need_update == 'true'
+        run: |
+          set -euo pipefail
+          cd /tmp/FnDepot
+          
+          # 暂存变更
+          git add "${{ env.APP_NAME }}/" fnpack.json README.md
+          
+          # 提交
+          COMMIT_MSG="chore: 更新${{ env.APP_NAME }}至v${{ steps.remote_ver.outputs.remote_version }}"
+          git commit -m "$COMMIT_MSG" || echo "✅ FnDepot无变更"
+          
+          # 推送（带重试）
+          git push origin main || (
+            echo "⚠️ 推送失败，尝试拉取后重试" &&
+            git pull --rebase origin main &&
+            git push origin main
+          )
+          echo "✅ FnDepot仓库更新完成"
+
+      # ===================== 第五步：创建GitHub Release =====================
+      - name: 17. 创建Release并上传文件
+        if: steps.compare.outputs.need_update == 'true'
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: "v${{ steps.remote_ver.outputs.remote_version }}"
+          name: "${{ env.APP_NAME }} v${{ steps.remote_ver.outputs.remote_version }}"
+          body: |
+            ## 自动更新说明
+            - 应用名称：${{ env.APP_NAME }}（${{ env.APP_DISPLAY_NAME }}）
+            - 版本：v${{ steps.remote_ver.outputs.remote_version }}
+            - 架构：Linux-AMD64
+            - 哈希：${{ steps.remote_ver.outputs.remote_digest }}
+            - 更新时间：${{ github.run_at }}
+          files: ${{ steps.build_fpk.outputs.fpk_release_file }}
+          overwrite: true
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      # ===================== 第六步：异常日志上传 =====================
+      - name: 18. 上传调试日志（失败时）
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: debug-logs-${{ github.run_id }}
+          path: |
+            ${{ env.APP_NAME }}/manifest
+            docker-image-digest.txt
+            /tmp/fpk_build/*
+            /tmp/FnDepot/README.md
+          retention-days: 7
