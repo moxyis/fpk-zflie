@@ -1,0 +1,28 @@
+{
+    "docker-project":
+    {
+        "projects":
+        [
+            {
+                "name": "fpk-zflie",
+                "path": "docker"
+            }
+        ]
+    },
+    "data-share":
+    {
+        "shares":
+        [
+            {
+                "name": "fpk-zflie",
+                "permission":
+                {
+                    "rw":
+                    [
+                        "docker-fpk-zflie"
+                    ]
+                }
+            }
+        ]
+    }
+}
