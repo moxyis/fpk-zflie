@@ -18,9 +18,9 @@ env:
   FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: "true"
   DEBUG_MODE: ${{ github.event.inputs.debug_mode || 'false' }}
 
-  APP_ID: "fpk-napcatqq"
-  APP_NAME: "NapCatQQ"
-  BASE_DIR: "fpk-napcatqq"
+  APP_ID: "fpk-zflie"
+  APP_NAME: "ZFile"
+  BASE_DIR: "fpk-zflie"
 
   DOCKER_IMAGE: "mlikiowa/napcat-docker"
   DOCKER_API_URL: "https://registry.hub.docker.com/v2/repositories/mlikiowa/napcat-docker/tags?page_size=100"
@@ -36,7 +36,7 @@ env:
 
   FNDEPOT_REPO: "moxyis/FnDepot"
   FNDEPOT_BRANCH: "main"
-  FNDEPOT_APP_DIR: "fpk-napcatqq"
+  FNDEPOT_APP_DIR: "fpk-zflie"
 
 jobs:
   build:
