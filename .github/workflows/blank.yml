@@ -22,8 +22,8 @@ env:
   APP_NAME: "ZFile"
   BASE_DIR: "fpk-zflie"
 
-  DOCKER_IMAGE: "mlikiowa/napcat-docker"
-  DOCKER_API_URL: "https://registry.hub.docker.com/v2/repositories/mlikiowa/napcat-docker/tags?page_size=100"
+  DOCKER_IMAGE: "zhaojun1998/zfile"
+  DOCKER_API_URL: "https://registry.hub.docker.com/v2/repositories/zhaojun1998/zfile/tags?page_size=100"
   DIGEST_FILE: "docker-image-digest.txt"
 
   FNPACK_VERSION: "1.2.1"
