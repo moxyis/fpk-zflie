@@ -4,7 +4,7 @@ services:
         container_name: zfile
         restart: always
         ports:
-            - '${TRIM_SERVICE_PORT}:8080'
+            - '${app_port}:8080'
         volumes:
             - '/${TRIM_APPDEST_VOL}/@appshare/${TRIM_APPNAME}/db:/root/.zfile-v4/db'
             - '/${TRIM_APPDEST_VOL}/@appshare/${TRIM_APPNAME}/logs:/root/.zfile-v4/logs'
