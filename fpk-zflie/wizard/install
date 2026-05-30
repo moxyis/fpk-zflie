@@ -1,1 +1,32 @@
-
+[
+  {
+    "stepTitle": "欢迎安装ZFile",
+    "items": [
+      {
+        "type": "tips",
+        "helpText": "基于 Java 的在线网盘程序，支持对接 S3、OneDrive、SharePoint、又拍云、本地存储、FTP 等存储源，支持在线浏览图片、播放音视频，文本文件等文件类型。"
+      }
+    ]
+  },
+  {
+    "stepTitle": "设置端口",
+    "items": [
+      {
+        "type": "text",
+        "field": "app_port",
+        "label": "应用端口",
+        "initValue": "9980",
+        "rules": [
+          {
+            "required": true,
+            "message": "请输入端口号"
+          },
+          {
+            "pattern": "^[0-9]+$",
+            "message": "端口号必须是数字"
+          }
+        ]
+      }
+    ]
+  }
+]
