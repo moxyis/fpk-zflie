@@ -6,6 +6,7 @@ source                = thirdparty
 maintainer            = zfile-dev
 maintainer_url        = https://www.zfile.vip/
 distributor           = moxyis
+distributor_url       = https://github.com/moxyis
 desktop_uidir         = ui
 desktop_applaunchname = fpk-zflie.Application
 platform = all
