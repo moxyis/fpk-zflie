@@ -22,7 +22,7 @@ env:
   APP_NAME: "ZFile"
   BASE_DIR: "fpk-zflie"
 
-  DOCKER_IMAGE: "zhaojun1998/zfile"
+  DOCKER_IMAGE: "zhaojun1998/zfile-pro"
   DOCKER_API_URL: "https://registry.hub.docker.com/v2/repositories/zhaojun1998/zfile/tags?page_size=100"
   DIGEST_FILE: "docker-image-digest.txt"
 
