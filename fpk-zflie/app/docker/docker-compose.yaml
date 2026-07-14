@@ -6,7 +6,7 @@ services:
         ports:
             - '${app_port}:8080'
         volumes:
-            - '/${TRIM_APPDEST_VOL}/@appshare/${TRIM_APPNAME}/db:/root/.zfile-v4/db'
-            - '/${TRIM_APPDEST_VOL}/@appshare/${TRIM_APPNAME}/logs:/root/.zfile-v4/logs'
-            - '/${TRIM_APPDEST_VOL}/@appshare/${TRIM_APPNAME}/file:/data/file'
-        image: zhaojun1998/zfile:latest
+            - '/${TRIM_APPDEST_VOL}/@appshare/${TRIM_APPNAME}/db:/root/zfile-pro/db'
+            - '/${TRIM_APPDEST_VOL}/@appshare/${TRIM_APPNAME}/logs:/root/zfile-pro/logs'
+            - '/${TRIM_APPDEST_VOL}/@appshare/${TRIM_APPNAME}/file:/root/zfile-pro/file'
+        image: zhaojun1998/zfile-pro:latest
