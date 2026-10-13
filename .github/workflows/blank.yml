@@ -342,34 +342,94 @@ jobs:
           rm -rf /tmp/FnDepot
           git clone "https://${{ secrets.FnDepot_PAT }}@github.com/${FNDEPOT_REPO}.git" /tmp/FnDepot
 
-      - name: 14. 生产模式：复制 FPK 到 FnDepot
+      - name: 14. 生产模式：推送 FPK 到 FnDepot
         if: steps.compare.outputs.need_update == 'true' && env.DEBUG_MODE == 'false'
         run: |
           set -euo pipefail
 
-          mkdir -p "/tmp/FnDepot/$FNDEPOT_APP_DIR"
-          cp "${{ steps.build_fpk.outputs.fpk_base_file }}" "/tmp/FnDepot/$FNDEPOT_APP_DIR/"
+          VERSION="${{ steps.remote_ver.outputs.remote_version }}"
+          SOURCE="${{ steps.build_fpk.outputs.fpk_base_file }}"
+          TARGET="/tmp/FnDepot/$FNDEPOT_APP_DIR"
 
-          echo "✅ 已复制：${APP_ID}.fpk"
+          test -s "$SOURCE" || {
+            echo "❌ FPK 文件不存在：$SOURCE"
+            exit 1
+          }
 
-      - name: 15. 生产模式：更新 FnDepot fnpack.json
+          test -d /tmp/FnDepot/.git || {
+            echo "❌ FnDepot 尚未克隆"
+            exit 1
+          }
+
+          mkdir -p "$TARGET/versions"
+
+          # 保留原有固定下载文件
+          cp "$SOURCE" "$TARGET/${APP_ID}.fpk"
+
+          # 保存独立版本安装包
+          cp "$SOURCE" \
+            "$TARGET/versions/${APP_ID}-v${VERSION}.fpk"
+
+          echo "✅ FPK 保存成功：$APP_ID $VERSION"
+
+      - name: 15. 生产模式：更新 FnDepot V2 应用源
         if: steps.compare.outputs.need_update == 'true' && env.DEBUG_MODE == 'false'
         run: |
           set -euo pipefail
 
           VERSION="${{ steps.remote_ver.outputs.remote_version }}"
           JSON_FILE="/tmp/FnDepot/fnpack.json"
+          FPK_FILE="/tmp/FnDepot/$FNDEPOT_APP_DIR/versions/${APP_ID}-v${VERSION}.fpk"
 
-          if [ ! -f "$JSON_FILE" ]; then
-            echo '{}' > "$JSON_FILE"
-          fi
+          test -s "$FPK_FILE"
+          test -f "$JSON_FILE"
 
-          jq --arg app "$APP_ID" --arg ver "$VERSION" \
-            '.[$app] = (.[$app] // {}) | .[$app].version = $ver' \
-            "$JSON_FILE" > "$JSON_FILE.tmp"
+          # 验证 FnDepot V2 格式
+          jq -e '.schema_version == "2" and (.apps | type == "object")' \
+            "$JSON_FILE" >/dev/null
+
+          jq -e --arg app "$APP_ID" \
+            '.apps[$app] | type == "object"' \
+            "$JSON_FILE" >/dev/null
+
+          SIZE=$(stat -c%s "$FPK_FILE")
+          SHA256=$(sha256sum "$FPK_FILE" | awk '{print $1}')
+          URL="./${APP_ID}/versions/${APP_ID}-v${VERSION}.fpk"
+
+          # 更新指定应用的版本记录
+          jq \
+            --arg app "$APP_ID" \
+            --arg ver "$VERSION" \
+            --arg url "$URL" \
+            --arg sha "$SHA256" \
+            --argjson size "$SIZE" \
+            '
+            .apps[$app].releases = (.apps[$app].releases // {}) |
+            .apps[$app].releases[$ver] = {
+              "changelog": ("自动构建更新至 " + $ver),
+              "packages": {
+                "all": {
+                  "download_url": $url,
+                  "size": $size,
+                  "sha256": $sha
+                }
+              }
+            }
+            ' "$JSON_FILE" > "$JSON_FILE.tmp"
+
+          # 验证更新结果
+          jq -e --arg app "$APP_ID" --arg ver "$VERSION" \
+            '.schema_version == "2" and
+             (.apps[$app].releases[$ver].packages.all.download_url | type == "string")' \
+            "$JSON_FILE.tmp" >/dev/null
 
           mv "$JSON_FILE.tmp" "$JSON_FILE"
-          cat "$JSON_FILE"
+
+          echo "✅ FnDepot V2 更新成功"
+          echo "应用：$APP_ID"
+          echo "版本：$VERSION"
+          echo "大小：$SIZE 字节"
+          echo "SHA256：$SHA256"
 
       - name: 16. 生产模式：更新 FnDepot README
         if: steps.compare.outputs.need_update == 'true' && env.DEBUG_MODE == 'false'
