@@ -25,6 +25,7 @@ concurrency:
   cancel-in-progress: false
 
 env:
+  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: "true"
   SOURCE_DIR: https://c.jun6.net/ZFILE-PRO/
   APP_ID: fpk-zflie
   FNDEPOT_REPO: moxyis/FnDepot
@@ -40,7 +41,7 @@ jobs:
     timeout-minutes: 35
     steps:
       - name: 检出监控仓库
-        uses: actions/checkout@v4
+        uses: actions/checkout@v6
 
       - name: 安装工具
         shell: bash
@@ -49,11 +50,24 @@ jobs:
           sudo apt-get update -qq
           sudo apt-get install -y -qq curl jq unzip file
 
+      - name: 初始化运行日志
+        shell: bash
+        run: |
+          mkdir -p logs dist
+          echo "$(TZ=Asia/Shanghai date '+%F %T %Z') | INFO | run=$GITHUB_RUN_ID mode=$RUN_MODE | 监控开始" > logs/monitor.log
+          echo "run_id=$GITHUB_RUN_ID" > logs/metadata.txt
+          echo "source=$SOURCE_DIR" >> logs/metadata.txt
+          echo "mode=$RUN_MODE" >> logs/metadata.txt
+
       - name: 发现官方最新双架构 FPK
         id: discover
         shell: bash
         run: |
           set -euo pipefail
+          mkdir -p logs
+          exec > >(tee -a "logs/monitor.log") 2> >(tee -a "logs/monitor.log" >&2)
+          echo "$(TZ=Asia/Shanghai date '+%F %T %Z') | START | 发现官方最新双架构 FPK"
+          trap 'code=$?; echo "$(TZ=Asia/Shanghai date '''+%F %T %Z''') | ERROR | 发现官方最新双架构 FPK | exit=$code" >&2' ERR
           mkdir -p dist
           curl --fail --location --retry 3 --connect-timeout 15 --max-time 90 \
             --silent --show-error "$SOURCE_DIR" -o dist/index.html
@@ -93,6 +107,10 @@ jobs:
           TAG: ${{ steps.discover.outputs.tag }}
         run: |
           set -euo pipefail
+          mkdir -p logs
+          exec > >(tee -a "logs/monitor.log") 2> >(tee -a "logs/monitor.log" >&2)
+          echo "$(TZ=Asia/Shanghai date '+%F %T %Z') | START | 检查现有 GitHub Release"
+          trap 'code=$?; echo "$(TZ=Asia/Shanghai date '''+%F %T %Z''') | ERROR | 检查现有 GitHub Release | exit=$code" >&2' ERR
           if gh release view "$TAG" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
             echo 'exists=true' >> "$GITHUB_OUTPUT"
             echo "已存在 $TAG，不覆盖原始文件。"
@@ -108,6 +126,10 @@ jobs:
           VERSION: ${{ steps.discover.outputs.version }}
         run: |
           set -euo pipefail
+          mkdir -p logs
+          exec > >(tee -a "logs/download.log") 2> >(tee -a "logs/download.log" >&2)
+          echo "$(TZ=Asia/Shanghai date '+%F %T %Z') | START | 下载并验证双架构 FPK"
+          trap 'code=$?; echo "$(TZ=Asia/Shanghai date '''+%F %T %Z''') | ERROR | 下载并验证双架构 FPK | exit=$code" >&2' ERR
           for arch in x86 arm; do
             name="zfile-pro-${VERSION}-fnos-${arch}.fpk"
             url="${SOURCE_DIR}${name}"
@@ -141,6 +163,10 @@ jobs:
           VERSION: ${{ steps.discover.outputs.version }}
         run: |
           set -euo pipefail
+          mkdir -p logs
+          exec > >(tee -a "logs/monitor.log") 2> >(tee -a "logs/monitor.log" >&2)
+          echo "$(TZ=Asia/Shanghai date '+%F %T %Z') | START | Debug 测试报告"
+          trap 'code=$?; echo "$(TZ=Asia/Shanghai date '''+%F %T %Z''') | ERROR | Debug 测试报告 | exit=$code" >&2' ERR
           {
             echo '## ZFile FPK Debug 检测'
             echo "- 版本：${VERSION}"
@@ -158,7 +184,7 @@ jobs:
 
       - name: 上传 Debug 校验结果
         if: env.RUN_MODE == 'debug' && steps.download.outputs.downloaded == 'true'
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v6
         with:
           name: zfile-debug-${{ steps.discover.outputs.version }}
           path: |
@@ -173,6 +199,10 @@ jobs:
           FNDEPOT_PAT: ${{ secrets.FnDepot_PAT }}
         run: |
           set -euo pipefail
+          mkdir -p logs
+          exec > >(tee -a "logs/publish.log") 2> >(tee -a "logs/publish.log" >&2)
+          echo "$(TZ=Asia/Shanghai date '+%F %T %Z') | START | 检查正式分发条件"
+          trap 'code=$?; echo "$(TZ=Asia/Shanghai date '''+%F %T %Z''') | ERROR | 检查正式分发条件 | exit=$code" >&2' ERR
           test -n "$FNDEPOT_PAT" || { echo '缺少 FnDepot_PAT Secret' >&2; exit 1; }
           test -s dist/SHA256SUMS
           echo '两个架构已下载；准备发布。'
@@ -184,6 +214,10 @@ jobs:
           VERSION: ${{ steps.discover.outputs.version }}
         run: |
           set -euo pipefail
+          mkdir -p logs
+          exec > >(tee -a "logs/publish.log") 2> >(tee -a "logs/publish.log" >&2)
+          echo "$(TZ=Asia/Shanghai date '+%F %T %Z') | START | 正式发布 GitHub Release"
+          trap 'code=$?; echo "$(TZ=Asia/Shanghai date '''+%F %T %Z''') | ERROR | 正式发布 GitHub Release | exit=$code" >&2' ERR
           gh release create "v${VERSION}" \
             "dist/zfile-pro-${VERSION}-fnos-x86.fpk" \
             "dist/zfile-pro-${VERSION}-fnos-arm.fpk" \
@@ -201,6 +235,10 @@ jobs:
           FNDEPOT_PAT: ${{ secrets.FnDepot_PAT }}
         run: |
           set -euo pipefail
+          mkdir -p logs
+          exec > >(tee -a "logs/publish.log") 2> >(tee -a "logs/publish.log" >&2)
+          echo "$(TZ=Asia/Shanghai date '+%F %T %Z') | START | 正式同步 FnDepot V2"
+          trap 'code=$?; echo "$(TZ=Asia/Shanghai date '''+%F %T %Z''') | ERROR | 正式同步 FnDepot V2 | exit=$code" >&2' ERR
           test -n "$FNDEPOT_PAT" || { echo '缺少 FnDepot_PAT Secret' >&2; exit 1; }
           # Release 可能在之前的运行中已创建；从 GitHub 下载可实现失败重试。
           mkdir -p /tmp/zfile-assets
@@ -258,6 +296,19 @@ jobs:
           git -c "http.https://github.com/.extraheader=AUTHORIZATION: basic $(printf 'x-access-token:%s' "$FNDEPOT_PAT" | base64 -w0)" \
             push origin "HEAD:${FNDEPOT_BRANCH}"
 
+      - name: 归档运行日志
+        if: always()
+        uses: actions/upload-artifact@v6
+        with:
+          name: zfile-monitor-logs-${{ github.run_id }}
+          path: |
+            logs/
+            dist/files.txt
+            dist/versions.txt
+            dist/SHA256SUMS
+          if-no-files-found: warn
+          retention-days: 30
+
       - name: 输出运行总结
         if: always()
         shell: bash
@@ -268,4 +319,6 @@ jobs:
             echo "- 官方目录：${SOURCE_DIR}"
             echo "- 最新配对版本：${{ steps.discover.outputs.version }}"
             echo "- Release 已存在：${{ steps.release.outputs.exists }}"
+            echo "- 日志归档：zfile-monitor-logs-${GITHUB_RUN_ID}（保留 30 天）"
+            echo "- 运行结果：${{ job.status }}"
           } >> "$GITHUB_STEP_SUMMARY"
