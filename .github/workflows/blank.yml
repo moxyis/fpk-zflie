@@ -1,518 +1,271 @@
-name: 通用模板自动打包 Docker FPK 并更新仓库
+name: ZFile 官方 FPK 监控与分发
 
 on:
   workflow_dispatch:
     inputs:
-      debug_mode:
-        description: "true=只打包不推送，false=生产推送"
+      run_mode:
+        description: 'debug=只检测下载; production=正式发布'
         required: true
-        default: "true"
         type: choice
-        options:
-          - "true"
-          - "false"
+        default: debug
+        options: [debug, production]
+      force_check:
+        description: '即使版本已发布也重新下载验证（不会覆盖发布）'
+        required: true
+        type: boolean
+        default: false
   schedule:
-    - cron: '0 0 * * *'
+    - cron: '0 */6 * * *'
+
+permissions:
+  contents: write
+
+concurrency:
+  group: zfile-fpk-sync
+  cancel-in-progress: false
 
 env:
-  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: "true"
-  DEBUG_MODE: ${{ github.event.inputs.debug_mode || 'false' }}
-
-  APP_ID: "fpk-zflie"
-  APP_NAME: "ZFile"
-  BASE_DIR: "fpk-zflie"
-
-  DOCKER_IMAGE: "zhaojun1998/zfile-pro"
-  DOCKER_API_URL: "https://registry.hub.docker.com/v2/repositories/zhaojun1998/zfile-pro/tags?page_size=100"
-  DIGEST_FILE: "docker-image-digest.txt"
-
-  FNPACK_VERSION: "1.2.1"
-  FNPACK_PLATFORM: "linux-amd64"
-  FNPACK_BASE_URL: "https://static2.fnnas.com/fnpack"
-
-  APP_PLATFORM: "all"
-  PACKAGE_DIR: "/tmp/fpk_build"
-  RELEASE_ARCH_NAME: "all"
-
-  FNDEPOT_REPO: "moxyis/FnDepot"
-  FNDEPOT_BRANCH: "main"
-  FNDEPOT_APP_DIR: "fpk-zflie"
+  SOURCE_DIR: https://c.jun6.net/ZFILE-PRO/
+  APP_ID: fpk-zflie
+  FNDEPOT_REPO: moxyis/FnDepot
+  FNDEPOT_BRANCH: main
+  # 定时任务默认 production；手动默认 debug
+  RUN_MODE: ${{ github.event_name == 'schedule' && 'production' || inputs.run_mode }}
+  FORCE_CHECK: ${{ inputs.force_check || false }}
+  GH_TOKEN: ${{ github.token }}
 
 jobs:
-  build:
+  monitor:
     runs-on: ubuntu-latest
-    timeout-minutes: 20
-
-    permissions:
-      contents: write
-      pull-requests: read
-
+    timeout-minutes: 35
     steps:
-      - name: 1. 检出当前仓库
-        uses: actions/checkout@v6
-        with:
-          fetch-depth: 0
-          token: ${{ secrets.GITHUB_TOKEN }}
+      - name: 检出监控仓库
+        uses: actions/checkout@v4
 
-      - name: 2. 安装基础依赖
+      - name: 安装工具
+        shell: bash
         run: |
           set -euo pipefail
-          sudo apt update
-          sudo apt install -y jq curl sed skopeo coreutils findutils file
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq curl jq unzip file
 
-      - name: 3. 初始化环境
-        id: init
+      - name: 发现官方最新双架构 FPK
+        id: discover
+        shell: bash
         run: |
           set -euo pipefail
+          mkdir -p dist
+          curl --fail --location --retry 3 --connect-timeout 15 --max-time 90 \
+            --silent --show-error "$SOURCE_DIR" -o dist/index.html
 
-          git config --global user.name "github-actions[bot]"
-          git config --global user.email "github-actions[bot]@users.noreply.github.com"
-          git config --global core.autocrlf false
-          git config --global pull.rebase false
-
-          BUILD_TIME=$(TZ='Asia/Shanghai' date "+%Y-%m-%d %H:%M:%S")
-          echo "build_time=$BUILD_TIME" >> "$GITHUB_OUTPUT"
-
-          echo "APP_ID=$APP_ID"
-          echo "APP_NAME=$APP_NAME"
-          echo "APP_PLATFORM=$APP_PLATFORM"
-
-      - name: 4. 读取本地 manifest 版本
-        id: local_ver
-        run: |
-          set -euo pipefail
-
-          MANIFEST_PATH="$BASE_DIR/manifest"
-
-          if [ ! -f "$MANIFEST_PATH" ]; then
-            mkdir -p "$BASE_DIR"
-            echo "version = 0.0.0" > "$MANIFEST_PATH"
-            echo "platform = $APP_PLATFORM" >> "$MANIFEST_PATH"
-          fi
-
-          LOCAL_VERSION=$(sed -n 's/^[[:space:]]*version[[:space:]]*[:=][[:space:]]*//p' "$MANIFEST_PATH" \
-            | head -n1 | tr -d '"' | tr -d "'" | tr -d '\r\n' | sed 's/^v//' | xargs)
-
-          if [ -z "$LOCAL_VERSION" ]; then
-            LOCAL_VERSION="0.0.0"
-          fi
-
-          echo "local_version=$LOCAL_VERSION" >> "$GITHUB_OUTPUT"
-          echo "本地版本：[$LOCAL_VERSION]"
-
-      - name: 5. 获取 Docker Hub 最新版本和 digest
-        id: remote_ver
-        run: |
-          set -euo pipefail
-
-          RAW_RESPONSE=$(curl -sSL --retry 3 --connect-timeout 10 "$DOCKER_API_URL")
-
-          ALL_VALID_TAGS=$(echo "$RAW_RESPONSE" | jq -r '.results[]?.name' \
-            | grep -v -E 'latest|dev|beta|alpha|nightly|test|rc|preview' \
-            | grep -E '^v?[0-9]+\.[0-9]+(\.[0-9]+)?$' || true)
-
-          if [ -z "$ALL_VALID_TAGS" ]; then
-            echo "❌ 未找到有效版本标签"
-            echo "$RAW_RESPONSE" | head -c 500
+          # 从 HTML 目录索引中提取文件名，不假设 href 顺序或固定 HTML 布局。
+          grep -Eo 'zfile-pro-[0-9]+\.[0-9]+\.[0-9]+-fnos-(x86|arm)\.fpk' dist/index.html \
+            | sort -u > dist/files.txt || true
+          if [[ ! -s dist/files.txt ]]; then
+            echo '错误：官方目录没有找到符合命名规则的 FPK。' >&2
             exit 1
           fi
+          echo '官方文件列表：'
+          cat dist/files.txt
 
-          REMOTE_VERSION=$(echo "$ALL_VALID_TAGS" | sed 's/^v//' | sort -V | tail -n1)
-
-          MATCH_TAG_WITH_V="v$REMOTE_VERSION"
-          MATCH_TAG_NO_V="$REMOTE_VERSION"
-
-          REMOTE_DIGEST=$(echo "$RAW_RESPONSE" | jq -r \
-            --arg tag_v "$MATCH_TAG_WITH_V" \
-            --arg tag_no_v "$MATCH_TAG_NO_V" \
-            '.results[]? | select(.name == $tag_v or .name == $tag_no_v) | .images[0].digest // ""' \
-            | head -n1 | tr -d '\r\n' | xargs)
-
-          if [ -z "$REMOTE_DIGEST" ] || [ "$REMOTE_DIGEST" = "null" ]; then
-            if echo "$ALL_VALID_TAGS" | grep -qx "$MATCH_TAG_WITH_V"; then
-              INSPECT_TAG="$MATCH_TAG_WITH_V"
-            else
-              INSPECT_TAG="$MATCH_TAG_NO_V"
+          # 仅接受两个架构都存在的最新版本。
+          cut -d- -f3 dist/files.txt | sort -Vu > dist/versions.txt
+          VERSION=''
+          while IFS= read -r candidate; do
+            if grep -Fxq "zfile-pro-${candidate}-fnos-x86.fpk" dist/files.txt \
+              && grep -Fxq "zfile-pro-${candidate}-fnos-arm.fpk" dist/files.txt; then
+              VERSION="$candidate"
+              break
             fi
-
-            REMOTE_DIGEST=$(skopeo inspect --format '{{.Digest}}' \
-              "docker://$DOCKER_IMAGE:$INSPECT_TAG" 2>/dev/null \
-              | tr -d '\r\n' | xargs || true)
-          fi
-
-          echo "remote_version=$REMOTE_VERSION" >> "$GITHUB_OUTPUT"
-          echo "remote_digest=$REMOTE_DIGEST" >> "$GITHUB_OUTPUT"
-
-          echo "最新版本：[$REMOTE_VERSION]"
-          echo "最新digest：[${REMOTE_DIGEST:0:20}...]"
-
-      - name: 6. 读取本地 digest
-        id: local_digest
-        run: |
-          set -euo pipefail
-
-          if [ ! -f "$DIGEST_FILE" ]; then
-            touch "$DIGEST_FILE"
-          fi
-
-          LOCAL_DIGEST=$(cat "$DIGEST_FILE" | tr -d '\r\n' | xargs || true)
-
-          echo "local_digest=$LOCAL_DIGEST" >> "$GITHUB_OUTPUT"
-          echo "本地digest：[${LOCAL_DIGEST:0:20}...]"
-
-      - name: 7. 判断是否需要更新
-        id: compare
-        run: |
-          set -euo pipefail
-
-          LOCAL_VER="${{ steps.local_ver.outputs.local_version }}"
-          REMOTE_VER="${{ steps.remote_ver.outputs.remote_version }}"
-          LOCAL_DIG="${{ steps.local_digest.outputs.local_digest }}"
-          REMOTE_DIG="${{ steps.remote_ver.outputs.remote_digest }}"
-
-          LOCAL_VER=$(echo "$LOCAL_VER" | sed 's/^v//' | xargs)
-          REMOTE_VER=$(echo "$REMOTE_VER" | sed 's/^v//' | xargs)
-          LOCAL_DIG=$(echo "$LOCAL_DIG" | xargs)
-          REMOTE_DIG=$(echo "$REMOTE_DIG" | xargs)
-
-          if [ "$DEBUG_MODE" = "true" ]; then
-            echo "need_update=true" >> "$GITHUB_OUTPUT"
-            echo "⚠️ Debug 模式：强制打包测试"
-            exit 0
-          fi
-
-          if [ "$LOCAL_VER" != "$REMOTE_VER" ]; then
-            echo "need_update=true" >> "$GITHUB_OUTPUT"
-            echo "🔄 版本不一致，需要更新"
-          elif [ -z "$LOCAL_DIG" ] && [ -n "$REMOTE_DIG" ]; then
-            echo "need_update=true" >> "$GITHUB_OUTPUT"
-            echo "🔄 本地 digest 为空，需要更新"
-          elif [ -n "$LOCAL_DIG" ] && [ -n "$REMOTE_DIG" ] && [ "$LOCAL_DIG" != "$REMOTE_DIG" ]; then
-            echo "need_update=true" >> "$GITHUB_OUTPUT"
-            echo "🔄 digest 不一致，需要更新"
-          else
-            echo "need_update=false" >> "$GITHUB_OUTPUT"
-            echo "✅ 版本和 digest 一致，无需更新"
-          fi
-
-      - name: 8. 更新本地 manifest、platform 和 digest
-        if: steps.compare.outputs.need_update == 'true'
-        run: |
-          set -euo pipefail
-
-          MANIFEST_PATH="$BASE_DIR/manifest"
-          NEW_VER="${{ steps.remote_ver.outputs.remote_version }}"
-          NEW_DIG="${{ steps.remote_ver.outputs.remote_digest }}"
-
-          if grep -qE '^[[:space:]]*version[[:space:]]*[:=]' "$MANIFEST_PATH"; then
-            sed -i -E \
-              "s/(^[[:space:]]*version[[:space:]]*[:=][[:space:]]*)([\"']?).*([\"']?)/\1\2${NEW_VER}\3/" \
-              "$MANIFEST_PATH"
-          else
-            echo "version = $NEW_VER" >> "$MANIFEST_PATH"
-          fi
-
-          if grep -qE '^[[:space:]]*platform[[:space:]]*[:=]' "$MANIFEST_PATH"; then
-            sed -i -E \
-              "s/(^[[:space:]]*platform[[:space:]]*[:=][[:space:]]*)([\"']?).*([\"']?)/\1\2${APP_PLATFORM}\3/" \
-              "$MANIFEST_PATH"
-          else
-            echo "platform = $APP_PLATFORM" >> "$MANIFEST_PATH"
-          fi
-
-          echo -n "$NEW_DIG" > "$DIGEST_FILE"
-
-          git add "$MANIFEST_PATH" "$DIGEST_FILE"
-
-          echo "manifest 内容："
-          cat "$MANIFEST_PATH"
-
-      - name: 9. 下载并安装 fnpack
-        if: steps.compare.outputs.need_update == 'true'
-        run: |
-          set -euo pipefail
-
-          FNPACK_URL="${FNPACK_BASE_URL}/fnpack-${FNPACK_VERSION}-${FNPACK_PLATFORM}"
-
-          echo "fnpack 下载地址：$FNPACK_URL"
-
-          HTTP_CODE=$(curl -L --retry 3 --connect-timeout 10 \
-            -w "%{http_code}" \
-            -o /tmp/fnpack \
-            "$FNPACK_URL")
-
-          echo "HTTP状态码：$HTTP_CODE"
-
-          if [ "$HTTP_CODE" != "200" ]; then
-            echo "❌ fnpack 下载失败"
-            head -n 20 /tmp/fnpack || true
+          done < <(sort -Vr dist/versions.txt)
+          if [[ -z "$VERSION" ]]; then
+            echo '错误：没有找到同版本的 x86 和 ARM 安装包。' >&2
             exit 1
           fi
+          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+          echo "tag=v$VERSION" >> "$GITHUB_OUTPUT"
+          echo "发现可配对版本：$VERSION"
 
-          if head -n 1 /tmp/fnpack | grep -qiE '<!DOCTYPE|<html'; then
-            echo "❌ 下载到的是 HTML，不是 fnpack 二进制"
-            head -n 20 /tmp/fnpack
-            exit 1
-          fi
-
-          install -m 755 /tmp/fnpack /usr/local/bin/fnpack
-
-          which fnpack
-          file /usr/local/bin/fnpack
-          fnpack --help | head -n 10 || true
-
-      - name: 10. 执行 fnpack 打包
-        if: steps.compare.outputs.need_update == 'true'
-        id: build_fpk
-        run: |
-          set -euo pipefail
-
-          VERSION="${{ steps.remote_ver.outputs.remote_version }}"
-
-          BUILD_ROOT="/tmp/fpk-packages"
-          BUILD_APP_DIR="$BUILD_ROOT/$APP_PLATFORM/$APP_ID"
-
-          rm -rf "$BUILD_ROOT" "$PACKAGE_DIR"
-          mkdir -p "$(dirname "$BUILD_APP_DIR")"
-          mkdir -p "$PACKAGE_DIR"
-
-          cp -a "$BASE_DIR" "$BUILD_APP_DIR"
-
-          echo "打包目录：$BUILD_APP_DIR"
-          find "$BUILD_ROOT" -maxdepth 3 -type d -print
-
-          rm -f ./*.fpk
-
-          fnpack build --directory "$BUILD_APP_DIR"
-
-          FPK_FILE=$(find "$PWD" -maxdepth 1 -name "*.fpk" -type f | head -n1)
-
-          if [ -z "$FPK_FILE" ]; then
-            echo "❌ 未生成 fpk 文件"
-            echo "当前目录：$PWD"
-            find "$PWD" -maxdepth 1 -type f
-            find "$BUILD_APP_DIR" -type f
-            exit 1
-          fi
-
-          FPK_RELEASE_NAME="${APP_ID}-v${VERSION}-${RELEASE_ARCH_NAME}.fpk"
-          FPK_BASE_NAME="${APP_ID}.fpk"
-
-          cp "$FPK_FILE" "$PACKAGE_DIR/$FPK_RELEASE_NAME"
-          cp "$FPK_FILE" "$PACKAGE_DIR/$FPK_BASE_NAME"
-
-          echo "fpk_release_file=$PACKAGE_DIR/$FPK_RELEASE_NAME" >> "$GITHUB_OUTPUT"
-          echo "fpk_release_name=$FPK_RELEASE_NAME" >> "$GITHUB_OUTPUT"
-          echo "fpk_base_file=$PACKAGE_DIR/$FPK_BASE_NAME" >> "$GITHUB_OUTPUT"
-
-          ls -lh "$PACKAGE_DIR"
-          sha256sum "$PACKAGE_DIR"/*.fpk
-
-      - name: 11. Debug 模式：只验证产物
-        if: steps.compare.outputs.need_update == 'true' && env.DEBUG_MODE == 'true'
-        run: |
-          set -euo pipefail
-
-          echo "⚠️ Debug 模式：不推送当前仓库，不推送 FnDepot，不创建 Release"
-          ls -lh "$PACKAGE_DIR"
-          sha256sum "$PACKAGE_DIR"/*.fpk
-
-      - name: 12. 生产模式：提交当前仓库变更
-        if: steps.compare.outputs.need_update == 'true' && env.DEBUG_MODE == 'false'
-        run: |
-          set -euo pipefail
-
-          COMMIT_MSG="chore: 更新${APP_NAME}至v${{ steps.remote_ver.outputs.remote_version }}"
-
-          if git diff --cached --quiet; then
-            echo "✅ 当前仓库无变更，跳过提交"
-          else
-            git commit -m "$COMMIT_MSG"
-            git push origin HEAD:${{ github.ref_name }} || (
-              git pull --rebase origin ${{ github.ref_name }} &&
-              git push origin HEAD:${{ github.ref_name }}
-            )
-          fi
-
-      - name: 13. 生产模式：克隆 FnDepot
-        if: steps.compare.outputs.need_update == 'true' && env.DEBUG_MODE == 'false'
-        run: |
-          set -euo pipefail
-
-          rm -rf /tmp/FnDepot
-          git clone "https://${{ secrets.FnDepot_PAT }}@github.com/${FNDEPOT_REPO}.git" /tmp/FnDepot
-
-      - name: 14. 生产模式：推送 FPK 到 FnDepot
-        if: steps.compare.outputs.need_update == 'true' && env.DEBUG_MODE == 'false'
-        run: |
-          set -euo pipefail
-
-          VERSION="${{ steps.remote_ver.outputs.remote_version }}"
-          SOURCE="${{ steps.build_fpk.outputs.fpk_base_file }}"
-          TARGET="/tmp/FnDepot/$FNDEPOT_APP_DIR"
-
-          test -s "$SOURCE" || {
-            echo "❌ FPK 文件不存在：$SOURCE"
-            exit 1
-          }
-
-          test -d /tmp/FnDepot/.git || {
-            echo "❌ FnDepot 尚未克隆"
-            exit 1
-          }
-
-          mkdir -p "$TARGET/versions"
-
-          # 保留原有固定下载文件
-          cp "$SOURCE" "$TARGET/${APP_ID}.fpk"
-
-          # 保存独立版本安装包
-          cp "$SOURCE" \
-            "$TARGET/versions/${APP_ID}-v${VERSION}.fpk"
-
-          echo "✅ FPK 保存成功：$APP_ID $VERSION"
-
-      - name: 15. 生产模式：更新 FnDepot V2 应用源
-        if: steps.compare.outputs.need_update == 'true' && env.DEBUG_MODE == 'false'
-        run: |
-          set -euo pipefail
-
-          VERSION="${{ steps.remote_ver.outputs.remote_version }}"
-          JSON_FILE="/tmp/FnDepot/fnpack.json"
-          FPK_FILE="/tmp/FnDepot/$FNDEPOT_APP_DIR/versions/${APP_ID}-v${VERSION}.fpk"
-
-          test -s "$FPK_FILE"
-          test -f "$JSON_FILE"
-
-          # 验证 FnDepot V2 格式
-          jq -e '.schema_version == "2" and (.apps | type == "object")' \
-            "$JSON_FILE" >/dev/null
-
-          jq -e --arg app "$APP_ID" \
-            '.apps[$app] | type == "object"' \
-            "$JSON_FILE" >/dev/null
-
-          SIZE=$(stat -c%s "$FPK_FILE")
-          SHA256=$(sha256sum "$FPK_FILE" | awk '{print $1}')
-          URL="./${APP_ID}/versions/${APP_ID}-v${VERSION}.fpk"
-
-          # 更新指定应用的版本记录
-          jq \
-            --arg app "$APP_ID" \
-            --arg ver "$VERSION" \
-            --arg url "$URL" \
-            --arg sha "$SHA256" \
-            --argjson size "$SIZE" \
-            '
-            .apps[$app].releases = (.apps[$app].releases // {}) |
-            .apps[$app].releases[$ver] = {
-              "changelog": ("自动构建更新至 " + $ver),
-              "packages": {
-                "all": {
-                  "download_url": $url,
-                  "size": $size,
-                  "sha256": $sha
-                }
-              }
-            }
-            ' "$JSON_FILE" > "$JSON_FILE.tmp"
-
-          # 验证更新结果
-          jq -e --arg app "$APP_ID" --arg ver "$VERSION" \
-            '.schema_version == "2" and
-             (.apps[$app].releases[$ver].packages.all.download_url | type == "string")' \
-            "$JSON_FILE.tmp" >/dev/null
-
-          mv "$JSON_FILE.tmp" "$JSON_FILE"
-
-          echo "✅ FnDepot V2 更新成功"
-          echo "应用：$APP_ID"
-          echo "版本：$VERSION"
-          echo "大小：$SIZE 字节"
-          echo "SHA256：$SHA256"
-
-      - name: 16. 生产模式：更新 FnDepot README
-        if: steps.compare.outputs.need_update == 'true' && env.DEBUG_MODE == 'false'
-        run: |
-          set -euo pipefail
-
-          VERSION="${{ steps.remote_ver.outputs.remote_version }}"
-          README_FILE="/tmp/FnDepot/README.md"
-
-          if [ ! -f "$README_FILE" ]; then
-            cat > "$README_FILE" <<EOF
-          # FnDepot
-
-          | 应用名称 | 版本号 | 来源 | 类型 |
-          |---|---|---|---|
-          | **${APP_NAME}** | ${VERSION} | ${DOCKER_IMAGE} | Docker |
-          EOF
-          else
-            if grep -q "\*\*${APP_NAME}\*\*" "$README_FILE"; then
-              sed -i -E \
-                "s/(^\|.*\*\*${APP_NAME}\*\*.*\|[[:space:]]*)v?[0-9.]+([[:space:]]*\|.*$)/\1${VERSION}\2/" \
-                "$README_FILE"
-            else
-              echo "| **${APP_NAME}** | ${VERSION} | ${DOCKER_IMAGE} | Docker |" >> "$README_FILE"
-            fi
-          fi
-
-          grep -A 1 "$APP_NAME" "$README_FILE" || true
-
-      - name: 17. 生产模式：提交 FnDepot 变更
-        if: steps.compare.outputs.need_update == 'true' && env.DEBUG_MODE == 'false'
-        run: |
-          set -euo pipefail
-
-          cd /tmp/FnDepot
-
-          git add "$FNDEPOT_APP_DIR/" fnpack.json README.md
-
-          if git diff --cached --quiet; then
-            echo "✅ FnDepot 无变更，跳过提交"
-          else
-            git commit -m "chore: 更新${APP_NAME}至v${{ steps.remote_ver.outputs.remote_version }}"
-            git push origin "$FNDEPOT_BRANCH" || (
-              git pull --rebase origin "$FNDEPOT_BRANCH" &&
-              git push origin "$FNDEPOT_BRANCH"
-            )
-          fi
-
-      - name: 18. 生产模式：创建 GitHub Release
-        if: steps.compare.outputs.need_update == 'true' && env.DEBUG_MODE == 'false'
-        uses: softprops/action-gh-release@v3
-        with:
-          overwrite_files: true
-          tag_name: "v${{ steps.remote_ver.outputs.remote_version }}-${{ env.RELEASE_ARCH_NAME }}"
-          name: "${{ env.APP_ID }} v${{ steps.remote_ver.outputs.remote_version }}"
-          body: |
-            ## 自动更新说明
-
-            - 应用：${{ env.APP_NAME }}
-            - 版本：v${{ steps.remote_ver.outputs.remote_version }}
-            - Platform：${{ env.APP_PLATFORM }}
-            - Release架构名：${{ env.RELEASE_ARCH_NAME }}
-            - Docker镜像：${{ env.DOCKER_IMAGE }}
-            - Digest：${{ steps.remote_ver.outputs.remote_digest }}
-            - fnpack版本：${{ env.FNPACK_VERSION }}
-            - 打包时间：${{ steps.init.outputs.build_time }}
-
-          files: ${{ steps.build_fpk.outputs.fpk_release_file }}
-          prerelease: false
-          make_latest: true
+      - name: 检查现有 GitHub Release
+        id: release
+        shell: bash
         env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAG: ${{ steps.discover.outputs.tag }}
+        run: |
+          set -euo pipefail
+          if gh release view "$TAG" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
+            echo 'exists=true' >> "$GITHUB_OUTPUT"
+            echo "已存在 $TAG，不覆盖原始文件。"
+          else
+            echo 'exists=false' >> "$GITHUB_OUTPUT"
+          fi
 
-      - name: 19. 失败时上传调试日志
-        if: failure()
+      - name: 下载并验证双架构 FPK
+        id: download
+        if: steps.release.outputs.exists != 'true' || env.FORCE_CHECK == 'true'
+        shell: bash
+        env:
+          VERSION: ${{ steps.discover.outputs.version }}
+        run: |
+          set -euo pipefail
+          for arch in x86 arm; do
+            name="zfile-pro-${VERSION}-fnos-${arch}.fpk"
+            url="${SOURCE_DIR}${name}"
+            echo "下载 $url"
+            curl --fail --location --retry 3 --retry-all-errors \
+              --connect-timeout 20 --max-time 600 \
+              --silent --show-error "$url" -o "dist/${name}.part"
+            test -s "dist/${name}.part"
+            # 避免下载到 200 HTML 错误页。
+            if head -c 512 "dist/${name}.part" | grep -Eaiq '<!doctype html|<html'; then
+              echo "错误：$name 返回 HTML 而非安装包。" >&2
+              exit 1
+            fi
+            # FPK 一般为归档格式；以 tar/unzip 能否列出内容作为基础完整性检查。
+            if ! tar -tf "dist/${name}.part" >/dev/null 2>&1 \
+              && ! unzip -tqq "dist/${name}.part" >/dev/null 2>&1; then
+              echo "错误：$name 不是可识别的 tar/zip 包，需人工核对官方 FPK 格式。" >&2
+              exit 1
+            fi
+            mv "dist/${name}.part" "dist/${name}"
+          done
+          (cd dist && sha256sum "zfile-pro-${VERSION}-fnos-x86.fpk" \
+            "zfile-pro-${VERSION}-fnos-arm.fpk" > SHA256SUMS)
+          cat dist/SHA256SUMS
+          echo 'downloaded=true' >> "$GITHUB_OUTPUT"
+
+      - name: Debug 测试报告
+        if: env.RUN_MODE == 'debug'
+        shell: bash
+        env:
+          VERSION: ${{ steps.discover.outputs.version }}
+        run: |
+          set -euo pipefail
+          {
+            echo '## ZFile FPK Debug 检测'
+            echo "- 版本：${VERSION}"
+            echo "- Release 已存在：${{ steps.release.outputs.exists }}"
+            if [[ -f dist/SHA256SUMS ]]; then
+              echo '### 本次下载 SHA-256'
+              echo '```'
+              cat dist/SHA256SUMS
+              echo '```'
+            else
+              echo '- 已发布且未强制检查，跳过重复下载。'
+            fi
+            echo '- Debug 不会发布或修改仓库。'
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: 上传 Debug 校验结果
+        if: env.RUN_MODE == 'debug' && steps.download.outputs.downloaded == 'true'
         uses: actions/upload-artifact@v4
         with:
-          name: debug-logs-${{ github.run_id }}
+          name: zfile-debug-${{ steps.discover.outputs.version }}
           path: |
-            ${{ env.BASE_DIR }}/manifest
-            ${{ env.DIGEST_FILE }}
-            /tmp/fpk_build/*
-            /tmp/fpk-packages/**/*
-            /tmp/FnDepot/README.md
-            /tmp/FnDepot/fnpack.json
+            dist/SHA256SUMS
+            dist/files.txt
           retention-days: 7
+
+      - name: 检查正式分发条件
+        if: env.RUN_MODE == 'production' && steps.release.outputs.exists != 'true'
+        shell: bash
+        env:
+          FNDEPOT_PAT: ${{ secrets.FnDepot_PAT }}
+        run: |
+          set -euo pipefail
+          test -n "$FNDEPOT_PAT" || { echo '缺少 FnDepot_PAT Secret' >&2; exit 1; }
+          test -s dist/SHA256SUMS
+          echo '两个架构已下载；准备发布。'
+
+      - name: 正式发布 GitHub Release
+        if: env.RUN_MODE == 'production' && steps.release.outputs.exists != 'true'
+        shell: bash
+        env:
+          VERSION: ${{ steps.discover.outputs.version }}
+        run: |
+          set -euo pipefail
+          gh release create "v${VERSION}" \
+            "dist/zfile-pro-${VERSION}-fnos-x86.fpk" \
+            "dist/zfile-pro-${VERSION}-fnos-arm.fpk" \
+            dist/SHA256SUMS \
+            --repo "$GITHUB_REPOSITORY" \
+            --title "ZFile v${VERSION} 官方 fnOS FPK 镜像" \
+            --notes "来源：${SOURCE_DIR}\n本 Release 原样分发官方 x86 / ARM FPK；SHA256SUMS 为镜像下载后的校验值。" \
+            --latest
+
+      - name: 正式同步 FnDepot V2
+        if: env.RUN_MODE == 'production'
+        shell: bash
+        env:
+          VERSION: ${{ steps.discover.outputs.version }}
+          FNDEPOT_PAT: ${{ secrets.FnDepot_PAT }}
+        run: |
+          set -euo pipefail
+          test -n "$FNDEPOT_PAT" || { echo '缺少 FnDepot_PAT Secret' >&2; exit 1; }
+          # Release 可能在之前的运行中已创建；从 GitHub 下载可实现失败重试。
+          mkdir -p /tmp/zfile-assets
+          gh release download "v${VERSION}" --repo "$GITHUB_REPOSITORY" \
+            --pattern "zfile-pro-${VERSION}-fnos-*.fpk" \
+            --pattern SHA256SUMS --dir /tmp/zfile-assets
+          (cd /tmp/zfile-assets && sha256sum -c SHA256SUMS)
+
+          # 不把 Token 写入远端 URL，使用一次性 HTTP Header 进行认证。
+          git -c "http.https://github.com/.extraheader=AUTHORIZATION: basic $(printf 'x-access-token:%s' "$FNDEPOT_PAT" | base64 -w0)" \
+            clone --depth 1 --branch "$FNDEPOT_BRANCH" \
+            "https://github.com/${FNDEPOT_REPO}.git" /tmp/FnDepot
+          cd /tmp/FnDepot
+          test -f fnpack.json
+          jq -e '.schema_version == "2" and (.apps | type == "object")' fnpack.json >/dev/null
+          jq -e --arg app "$APP_ID" '.apps[$app] | type == "object"' fnpack.json >/dev/null
+
+          mkdir -p "$APP_ID/versions"
+          for arch in x86 arm; do
+            name="zfile-pro-${VERSION}-fnos-${arch}.fpk"
+            cp "/tmp/zfile-assets/$name" "$APP_ID/versions/$name"
+          done
+          X86="$APP_ID/versions/zfile-pro-${VERSION}-fnos-x86.fpk"
+          ARM="$APP_ID/versions/zfile-pro-${VERSION}-fnos-arm.fpk"
+          X86_SIZE=$(stat -c%s "$X86")
+          ARM_SIZE=$(stat -c%s "$ARM")
+          X86_SHA=$(sha256sum "$X86" | awk '{print $1}')
+          ARM_SHA=$(sha256sum "$ARM" | awk '{print $1}')
+          jq --arg app "$APP_ID" --arg ver "$VERSION" \
+            --arg x86 "./$X86" --arg arm "./$ARM" \
+            --arg xsha "$X86_SHA" --arg asha "$ARM_SHA" \
+            --argjson xsize "$X86_SIZE" --argjson asize "$ARM_SIZE" '
+            .apps[$app].platform = ["x86", "arm"] |
+            .apps[$app].is_docker = false |
+            .apps[$app].releases = (.apps[$app].releases // {}) |
+            .apps[$app].releases[$ver] = {
+              changelog: ("同步 ZFile 官方 fnOS FPK " + $ver),
+              packages: {
+                x86: {download_url: $x86, size: $xsize, sha256: $xsha},
+                arm: {download_url: $arm, size: $asize, sha256: $asha}
+              }
+            }
+          ' fnpack.json > fnpack.json.tmp
+          jq -e --arg app "$APP_ID" --arg ver "$VERSION" \
+            '.apps[$app].releases[$ver].packages | has("x86") and has("arm")' fnpack.json.tmp >/dev/null
+          mv fnpack.json.tmp fnpack.json
+          git config user.name 'github-actions[bot]'
+          git config user.email 'github-actions[bot]@users.noreply.github.com'
+          git add fnpack.json "$APP_ID/versions/"
+          if git diff --cached --quiet; then
+            echo 'FnDepot 已同步，无需提交。'
+            exit 0
+          fi
+          git commit -m "chore(zfile): sync official fnOS FPK v${VERSION}"
+          git -c "http.https://github.com/.extraheader=AUTHORIZATION: basic $(printf 'x-access-token:%s' "$FNDEPOT_PAT" | base64 -w0)" \
+            push origin "HEAD:${FNDEPOT_BRANCH}"
+
+      - name: 输出运行总结
+        if: always()
+        shell: bash
+        run: |
+          {
+            echo '## 运行信息'
+            echo "- 模式：${RUN_MODE}"
+            echo "- 官方目录：${SOURCE_DIR}"
+            echo "- 最新配对版本：${{ steps.discover.outputs.version }}"
+            echo "- Release 已存在：${{ steps.release.outputs.exists }}"
+          } >> "$GITHUB_STEP_SUMMARY"
