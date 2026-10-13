@@ -4,14 +4,13 @@ on:
   workflow_dispatch:
     inputs:
       run_mode:
-        description: 'debug=只检测下载; production=正式发布'
-        required: true
+        description: 'debug 只检测；production 正式同步'
         type: choice
+        required: true
         default: debug
         options: [debug, production]
       force_check:
-        description: '即使版本已发布也重新下载验证（不会覆盖发布）'
-        required: true
+        description: '已发布版本也重新下载校验（不覆盖 Release）'
         type: boolean
         default: false
   schedule:
@@ -19,309 +18,230 @@ on:
 
 permissions:
   contents: write
-
 concurrency:
-  group: zfile-fpk-sync
+  group: zfile-fpk-monitor
   cancel-in-progress: false
 
 env:
-  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: "true"
+  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: 'true'
   SOURCE_DIR: https://c.jun6.net/ZFILE-PRO/
   APP_ID: fpk-zflie
   FNDEPOT_REPO: moxyis/FnDepot
   FNDEPOT_BRANCH: main
-  # 定时任务默认 production；手动默认 debug
   RUN_MODE: ${{ github.event_name == 'schedule' && 'production' || inputs.run_mode }}
   FORCE_CHECK: ${{ inputs.force_check || false }}
   GH_TOKEN: ${{ github.token }}
 
 jobs:
   monitor:
+    name: monitor
     runs-on: ubuntu-latest
-    timeout-minutes: 35
+    timeout-minutes: 40
+    defaults:
+      run:
+        shell: bash
     steps:
-      - name: 01. 检出监控仓库
+      - name: '01. 检出当前仓库'
         uses: actions/checkout@v6
 
-      - name: 02. 安装工具
-        shell: bash
+      - name: '02. 初始化环境及工具'
         run: |
           set -euo pipefail
-          sudo apt-get update -qq
-          sudo apt-get install -y -qq curl jq unzip file
-
-      - name: 03. 发现官方最新双架构 FPK
-        id: discover
-        shell: bash
-        run: |
-          set -euo pipefail
-          STEP_NAME="发现官方最新双架构 FPK"
-          echo "$(TZ=Asia/Shanghai date '+%F %T CST') | START | ${STEP_NAME}"
-          on_step_error() {
-            local code=$?
-            trap - ERR
-            printf "%s | ERROR | step=%s | exit=%s | line=%s\n" "$(TZ=Asia/Shanghai date "+%F %T CST")" "${STEP_NAME:-unknown}" "$code" "${BASH_LINENO[0]:-unknown}" >&2
-            exit "$code"
-          }
-          trap 'on_step_error' ERR
+          command -v curl; command -v jq; command -v gh; command -v tar; command -v sha256sum
           mkdir -p dist
-          curl --fail --location --retry 3 --connect-timeout 15 --max-time 90 \
-            --silent --show-error "$SOURCE_DIR" -o dist/index.html
+          printf '%s | INFO | run=%s mode=%s | 初始化完成\n' "$(TZ=Asia/Shanghai date '+%F %T CST')" "$GITHUB_RUN_ID" "$RUN_MODE"
 
-          # 从 HTML 目录索引中提取文件名，不假设 href 顺序或固定 HTML 布局。
-          grep -Eo 'zfile-pro-[0-9]+\.[0-9]+\.[0-9]+-fnos-(x86|arm)\.fpk' dist/index.html \
-            | sort -u > dist/files.txt || true
-          if [[ ! -s dist/files.txt ]]; then
-            echo '错误：官方目录没有找到符合命名规则的 FPK。' >&2
-            exit 1
-          fi
-          echo '官方文件列表：'
+      - name: '03. 读取官方 FPK 文件目录'
+        run: |
+          set -euo pipefail
+          printf '%s | START | 读取 %s\n' "$(TZ=Asia/Shanghai date '+%F %T CST')" "$SOURCE_DIR"
+          curl -fLSs --retry 3 --connect-timeout 15 --max-time 90 "$SOURCE_DIR" -o dist/index.html
+          test -s dist/index.html
+          printf '%s | SUCCESS | 官方目录已读取，大小=%s 字节\n' "$(TZ=Asia/Shanghai date '+%F %T CST')" "$(stat -c%s dist/index.html)"
+
+      - name: '04. 识别官方 FPK 文件名'
+        run: |
+          set -euo pipefail
+          grep -Eo 'zfile-pro-[0-9]+\.[0-9]+\.[0-9]+-fnos-(x86|arm)\.fpk' dist/index.html | sort -u > dist/files.txt || true
+          test -s dist/files.txt || { echo 'ERROR | 未识别到官方 fnOS FPK 文件名'; exit 1; }
+          printf '%s | INFO | 检测到 %s 个 FPK 文件名\n' "$(TZ=Asia/Shanghai date '+%F %T CST')" "$(wc -l < dist/files.txt)"
           cat dist/files.txt
 
-          # 仅接受两个架构都存在的最新版本。
-          cut -d- -f3 dist/files.txt | sort -Vu > dist/versions.txt
-          VERSION=''
-          while IFS= read -r candidate; do
-            if grep -Fxq "zfile-pro-${candidate}-fnos-x86.fpk" dist/files.txt \
-              && grep -Fxq "zfile-pro-${candidate}-fnos-arm.fpk" dist/files.txt; then
-              VERSION="$candidate"
-              break
+      - name: '05. 匹配最新双架构版本'
+        id: discover
+        run: |
+          set -euo pipefail
+          sed -nE 's/^zfile-pro-([0-9]+\.[0-9]+\.[0-9]+)-fnos-(x86|arm)\.fpk$/\1/p' dist/files.txt | sort -Vu > dist/versions.txt
+          version=''
+          while IFS= read -r v; do
+            if grep -Fxq "zfile-pro-${v}-fnos-x86.fpk" dist/files.txt && grep -Fxq "zfile-pro-${v}-fnos-arm.fpk" dist/files.txt; then
+              version="$v"; break
             fi
           done < <(sort -Vr dist/versions.txt)
-          if [[ -z "$VERSION" ]]; then
-            echo '错误：没有找到同版本的 x86 和 ARM 安装包。' >&2
-            exit 1
-          fi
-          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
-          echo "tag=v$VERSION" >> "$GITHUB_OUTPUT"
-          echo "$(TZ=Asia/Shanghai date '+%F %T CST') | INFO | 配对成功 version=$VERSION"
+          test -n "$version" || { echo 'ERROR | 没有同版本的 x86 + ARM FPK'; exit 1; }
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+          echo "tag=v$version" >> "$GITHUB_OUTPUT"
+          printf '%s | SUCCESS | 最新完整版本=%s，x86/ARM 配对成功\n' "$(TZ=Asia/Shanghai date '+%F %T CST')" "$version"
 
-      - name: 04. 检查现有 GitHub Release
+      - name: '06. 检查 GitHub Release 状态'
         id: release
-        shell: bash
         env:
           TAG: ${{ steps.discover.outputs.tag }}
         run: |
           set -euo pipefail
-          STEP_NAME="检查现有 GitHub Release"
-          echo "$(TZ=Asia/Shanghai date '+%F %T CST') | START | ${STEP_NAME}"
-          on_step_error() {
-            local code=$?
-            trap - ERR
-            printf "%s | ERROR | step=%s | exit=%s | line=%s\n" "$(TZ=Asia/Shanghai date "+%F %T CST")" "${STEP_NAME:-unknown}" "$code" "${BASH_LINENO[0]:-unknown}" >&2
-            exit "$code"
-          }
-          trap 'on_step_error' ERR
           if gh release view "$TAG" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
             echo 'exists=true' >> "$GITHUB_OUTPUT"
-            echo "已存在 $TAG，不覆盖原始文件。"
+            echo "INFO | $TAG 已存在，不覆盖已有 Release"
           else
             echo 'exists=false' >> "$GITHUB_OUTPUT"
+            echo "INFO | $TAG 尚未发布"
           fi
 
-      - name: 05. 下载并检查双架构 FPK
-        id: download
+      - name: '07. 下载 x86 官方 FPK'
         if: env.RUN_MODE == 'debug' || steps.release.outputs.exists != 'true' || env.FORCE_CHECK == 'true'
-        shell: bash
         env:
           VERSION: ${{ steps.discover.outputs.version }}
         run: |
           set -euo pipefail
-          STEP_NAME="下载并检查双架构 FPK"
-          echo "$(TZ=Asia/Shanghai date '+%F %T CST') | START | ${STEP_NAME}"
-          on_step_error() {
-            local code=$?
-            trap - ERR
-            printf "%s | ERROR | step=%s | exit=%s | line=%s\n" "$(TZ=Asia/Shanghai date "+%F %T CST")" "${STEP_NAME:-unknown}" "$code" "${BASH_LINENO[0]:-unknown}" >&2
-            exit "$code"
-          }
-          trap 'on_step_error' ERR
+          name="zfile-pro-${VERSION}-fnos-x86.fpk"
+          echo "$(TZ=Asia/Shanghai date '+%F %T CST') | START | 下载 $name"
+          curl -fLSs --retry 3 --retry-all-errors --connect-timeout 20 --max-time 900 "${SOURCE_DIR}${name}" -o "dist/${name}.part"
+          test -s "dist/${name}.part"
+          mv "dist/${name}.part" "dist/$name"
+          echo "$(TZ=Asia/Shanghai date '+%F %T CST') | SUCCESS | x86 下载完成 $(stat -c%s "dist/$name") bytes"
+
+      - name: '08. 下载 ARM 官方 FPK'
+        if: env.RUN_MODE == 'debug' || steps.release.outputs.exists != 'true' || env.FORCE_CHECK == 'true'
+        env:
+          VERSION: ${{ steps.discover.outputs.version }}
+        run: |
+          set -euo pipefail
+          name="zfile-pro-${VERSION}-fnos-arm.fpk"
+          echo "$(TZ=Asia/Shanghai date '+%F %T CST') | START | 下载 $name"
+          curl -fLSs --retry 3 --retry-all-errors --connect-timeout 20 --max-time 900 "${SOURCE_DIR}${name}" -o "dist/${name}.part"
+          test -s "dist/${name}.part"
+          mv "dist/${name}.part" "dist/$name"
+          echo "$(TZ=Asia/Shanghai date '+%F %T CST') | SUCCESS | ARM 下载完成 $(stat -c%s "dist/$name") bytes"
+
+      - name: '09. 校验两个 FPK 并输出 SHA-256'
+        if: env.RUN_MODE == 'debug' || steps.release.outputs.exists != 'true' || env.FORCE_CHECK == 'true'
+        env:
+          VERSION: ${{ steps.discover.outputs.version }}
+        run: |
+          set -euo pipefail
           for arch in x86 arm; do
             name="zfile-pro-${VERSION}-fnos-${arch}.fpk"
-            url="${SOURCE_DIR}${name}"
-            echo "$(TZ=Asia/Shanghai date '+%F %T CST') | INFO | 下载 $url"
-            curl --fail --location --retry 3 --retry-all-errors \
-              --connect-timeout 20 --max-time 600 \
-              --silent --show-error "$url" -o "dist/${name}.part"
-            test -s "dist/${name}.part"
-            # 避免下载到 200 HTML 错误页。
-            if head -c 512 "dist/${name}.part" | grep -Eaiq '<!doctype html|<html'; then
-              echo "错误：$name 返回 HTML 而非安装包。" >&2
-              exit 1
+            test -s "dist/$name"
+            if head -c 512 "dist/$name" | grep -Eaiq '<!doctype html|<html'; then
+              echo "ERROR | $name 下载内容为 HTML"; exit 1
             fi
-            # FPK 一般为归档格式；以 tar/unzip 能否列出内容作为基础完整性检查。
-            if ! tar -tf "dist/${name}.part" >/dev/null 2>&1 \
-              && ! unzip -tqq "dist/${name}.part" >/dev/null 2>&1; then
-              echo "错误：$name 不是可识别的 tar/zip 包，需人工核对官方 FPK 格式。" >&2
-              exit 1
+            if ! tar -tf "dist/$name" >/dev/null 2>&1 && ! unzip -tqq "dist/$name" >/dev/null 2>&1; then
+              echo "ERROR | $name 不是可识别的 tar/zip FPK；需核对包格式"; exit 1
             fi
-            mv "dist/${name}.part" "dist/${name}"
           done
-          (cd dist && sha256sum "zfile-pro-${VERSION}-fnos-x86.fpk" \
-            "zfile-pro-${VERSION}-fnos-arm.fpk" > SHA256SUMS)
+          (cd dist && sha256sum "zfile-pro-${VERSION}-fnos-x86.fpk" "zfile-pro-${VERSION}-fnos-arm.fpk" > SHA256SUMS)
           cat dist/SHA256SUMS
-          echo 'downloaded=true' >> "$GITHUB_OUTPUT"
-          echo "$(TZ=Asia/Shanghai date '+%F %T CST') | SUCCESS | 两架构 FPK 下载和完整性检查通过"
+          echo 'SUCCESS | 两个 FPK 均通过归档完整性检查；上述哈希为本次下载计算值，不代表上游签名校验'
 
-      - name: 06. Debug 测试报告
+      - name: '10. Debug 模式：展示检测结果'
         if: env.RUN_MODE == 'debug'
-        shell: bash
         env:
           VERSION: ${{ steps.discover.outputs.version }}
         run: |
           set -euo pipefail
-          STEP_NAME="Debug 测试报告"
-          echo "$(TZ=Asia/Shanghai date '+%F %T CST') | START | ${STEP_NAME}"
-          on_step_error() {
-            local code=$?
-            trap - ERR
-            printf "%s | ERROR | step=%s | exit=%s | line=%s\n" "$(TZ=Asia/Shanghai date "+%F %T CST")" "${STEP_NAME:-unknown}" "$code" "${BASH_LINENO[0]:-unknown}" >&2
-            exit "$code"
-          }
-          trap 'on_step_error' ERR
-          {
-            echo '## ZFile FPK Debug 检测'
-            echo "- 版本：${VERSION}"
-            echo "- Release 已存在：${{ steps.release.outputs.exists }}"
-            if [[ -f dist/SHA256SUMS ]]; then
-              echo '### 本次下载 SHA-256'
-              echo '```'
-              cat dist/SHA256SUMS
-              echo '```'
-            else
-              echo '- 已发布且未强制检查，跳过重复下载。'
-            fi
-            echo '- Debug 不会发布或修改仓库。'
-          } >> "$GITHUB_STEP_SUMMARY"
+          echo "SUCCESS | Debug 完成，版本=$VERSION；没有发布或修改任何仓库"
+          cat dist/SHA256SUMS
 
-      - name: 07. 检查正式分发条件
+      - name: '11. Production：检查发布前置条件'
         if: env.RUN_MODE == 'production' && steps.release.outputs.exists != 'true'
-        shell: bash
         env:
           FNDEPOT_PAT: ${{ secrets.FnDepot_PAT }}
         run: |
           set -euo pipefail
-          STEP_NAME="检查正式分发条件"
-          echo "$(TZ=Asia/Shanghai date '+%F %T CST') | START | ${STEP_NAME}"
-          on_step_error() {
-            local code=$?
-            trap - ERR
-            printf "%s | ERROR | step=%s | exit=%s | line=%s\n" "$(TZ=Asia/Shanghai date "+%F %T CST")" "${STEP_NAME:-unknown}" "$code" "${BASH_LINENO[0]:-unknown}" >&2
-            exit "$code"
-          }
-          trap 'on_step_error' ERR
-          test -n "$FNDEPOT_PAT" || { echo '缺少 FnDepot_PAT Secret' >&2; exit 1; }
+          test -n "$FNDEPOT_PAT" || { echo 'ERROR | 缺少 FnDepot_PAT'; exit 1; }
           test -s dist/SHA256SUMS
-          echo '两个架构已下载；准备发布。'
+          echo 'SUCCESS | 双架构文件已就绪，FnDepot Token 已配置'
 
-      - name: 08. 正式发布 GitHub Release
+      - name: '12. Production：发布 GitHub Release'
         if: env.RUN_MODE == 'production' && steps.release.outputs.exists != 'true'
-        shell: bash
         env:
           VERSION: ${{ steps.discover.outputs.version }}
         run: |
           set -euo pipefail
-          STEP_NAME="正式发布 GitHub Release"
-          echo "$(TZ=Asia/Shanghai date '+%F %T CST') | START | ${STEP_NAME}"
-          on_step_error() {
-            local code=$?
-            trap - ERR
-            printf "%s | ERROR | step=%s | exit=%s | line=%s\n" "$(TZ=Asia/Shanghai date "+%F %T CST")" "${STEP_NAME:-unknown}" "$code" "${BASH_LINENO[0]:-unknown}" >&2
-            exit "$code"
-          }
-          trap 'on_step_error' ERR
-          gh release create "v${VERSION}" \
-            "dist/zfile-pro-${VERSION}-fnos-x86.fpk" \
-            "dist/zfile-pro-${VERSION}-fnos-arm.fpk" \
-            dist/SHA256SUMS \
-            --repo "$GITHUB_REPOSITORY" \
-            --title "ZFile v${VERSION} 官方 fnOS FPK 镜像" \
-            --notes "来源：${SOURCE_DIR}\n本 Release 原样分发官方 x86 / ARM FPK；SHA256SUMS 为镜像下载后的校验值。" \
-            --latest
+          gh release create "v${VERSION}" "dist/zfile-pro-${VERSION}-fnos-x86.fpk" "dist/zfile-pro-${VERSION}-fnos-arm.fpk" dist/SHA256SUMS \
+            --repo "$GITHUB_REPOSITORY" --title "ZFile v${VERSION} 官方 fnOS FPK 镜像" \
+            --notes "来源：${SOURCE_DIR}；原样分发 x86/ARM FPK。SHA256SUMS 为下载后计算的哈希。" --latest
+          echo "SUCCESS | 已创建 v${VERSION} Release"
 
-      - name: 09. 正式同步 FnDepot V2
+      - name: '13. Production：获取 Release 文件并验证'
         if: env.RUN_MODE == 'production'
-        shell: bash
+        env:
+          VERSION: ${{ steps.discover.outputs.version }}
+        run: |
+          set -euo pipefail
+          mkdir -p /tmp/zfile-release
+          gh release download "v${VERSION}" --repo "$GITHUB_REPOSITORY" --pattern "zfile-pro-${VERSION}-fnos-*.fpk" --pattern SHA256SUMS --dir /tmp/zfile-release
+          (cd /tmp/zfile-release && sha256sum -c SHA256SUMS)
+          echo 'SUCCESS | Release 两架构文件完整'
+
+      - name: '14. Production：同步 FnDepot V2'
+        if: env.RUN_MODE == 'production'
         env:
           VERSION: ${{ steps.discover.outputs.version }}
           FNDEPOT_PAT: ${{ secrets.FnDepot_PAT }}
         run: |
           set -euo pipefail
-          STEP_NAME="正式同步 FnDepot V2"
-          echo "$(TZ=Asia/Shanghai date '+%F %T CST') | START | ${STEP_NAME}"
-          on_step_error() {
-            local code=$?
-            trap - ERR
-            printf "%s | ERROR | step=%s | exit=%s | line=%s\n" "$(TZ=Asia/Shanghai date "+%F %T CST")" "${STEP_NAME:-unknown}" "$code" "${BASH_LINENO[0]:-unknown}" >&2
-            exit "$code"
-          }
-          trap 'on_step_error' ERR
-          test -n "$FNDEPOT_PAT" || { echo '缺少 FnDepot_PAT Secret' >&2; exit 1; }
-          # Release 可能在之前的运行中已创建；从 GitHub 下载可实现失败重试。
-          mkdir -p /tmp/zfile-assets
-          gh release download "v${VERSION}" --repo "$GITHUB_REPOSITORY" \
-            --pattern "zfile-pro-${VERSION}-fnos-*.fpk" \
-            --pattern SHA256SUMS --dir /tmp/zfile-assets
-          (cd /tmp/zfile-assets && sha256sum -c SHA256SUMS)
-
-          # 不把 Token 写入远端 URL，使用一次性 HTTP Header 进行认证。
-          git -c "http.https://github.com/.extraheader=AUTHORIZATION: basic $(printf 'x-access-token:%s' "$FNDEPOT_PAT" | base64 -w0)" \
-            clone --depth 1 --branch "$FNDEPOT_BRANCH" \
-            "https://github.com/${FNDEPOT_REPO}.git" /tmp/FnDepot
+          test -n "$FNDEPOT_PAT" || { echo 'ERROR | 缺少 FnDepot_PAT'; exit 1; }
+          auth="AUTHORIZATION: basic $(printf 'x-access-token:%s' "$FNDEPOT_PAT" | base64 -w0)"
+          git -c "http.https://github.com/.extraheader=$auth" clone --depth 1 --branch "$FNDEPOT_BRANCH" "https://github.com/${FNDEPOT_REPO}.git" /tmp/FnDepot
           cd /tmp/FnDepot
-          test -f fnpack.json
-          jq -e '.schema_version == "2" and (.apps | type == "object")' fnpack.json >/dev/null
-          jq -e --arg app "$APP_ID" '.apps[$app] | type == "object"' fnpack.json >/dev/null
-
+          jq -e --arg app "$APP_ID" '.schema_version == "2" and (.apps[$app] | type == "object")' fnpack.json >/dev/null
           mkdir -p "$APP_ID/versions"
           for arch in x86 arm; do
-            name="zfile-pro-${VERSION}-fnos-${arch}.fpk"
-            cp "/tmp/zfile-assets/$name" "$APP_ID/versions/$name"
+            cp "/tmp/zfile-release/zfile-pro-${VERSION}-fnos-${arch}.fpk" "$APP_ID/versions/"
           done
-          X86="$APP_ID/versions/zfile-pro-${VERSION}-fnos-x86.fpk"
-          ARM="$APP_ID/versions/zfile-pro-${VERSION}-fnos-arm.fpk"
-          X86_SIZE=$(stat -c%s "$X86")
-          ARM_SIZE=$(stat -c%s "$ARM")
-          X86_SHA=$(sha256sum "$X86" | awk '{print $1}')
-          ARM_SHA=$(sha256sum "$ARM" | awk '{print $1}')
+          x="$APP_ID/versions/zfile-pro-${VERSION}-fnos-x86.fpk"
+          a="$APP_ID/versions/zfile-pro-${VERSION}-fnos-arm.fpk"
           jq --arg app "$APP_ID" --arg ver "$VERSION" \
-            --arg x86 "./$X86" --arg arm "./$ARM" \
-            --arg xsha "$X86_SHA" --arg asha "$ARM_SHA" \
-            --argjson xsize "$X86_SIZE" --argjson asize "$ARM_SIZE" '
+            --arg xu "./$x" --arg au "./$a" \
+            --arg xs "$(sha256sum "$x" | cut -d' ' -f1)" --arg as "$(sha256sum "$a" | cut -d' ' -f1)" \
+            --argjson xsize "$(stat -c%s "$x")" --argjson asize "$(stat -c%s "$a")" '
             .apps[$app].platform = ["x86", "arm"] |
             .apps[$app].is_docker = false |
             .apps[$app].releases = (.apps[$app].releases // {}) |
             .apps[$app].releases[$ver] = {
               changelog: ("同步 ZFile 官方 fnOS FPK " + $ver),
               packages: {
-                x86: {download_url: $x86, size: $xsize, sha256: $xsha},
-                arm: {download_url: $arm, size: $asize, sha256: $asha}
+                x86: {download_url:$xu,size:$xsize,sha256:$xs},
+                arm: {download_url:$au,size:$asize,sha256:$as}
               }
-            }
-          ' fnpack.json > fnpack.json.tmp
-          jq -e --arg app "$APP_ID" --arg ver "$VERSION" \
-            '.apps[$app].releases[$ver].packages | has("x86") and has("arm")' fnpack.json.tmp >/dev/null
+            }' fnpack.json > fnpack.json.tmp
+          jq -e --arg app "$APP_ID" --arg ver "$VERSION" '.apps[$app].releases[$ver].packages | has("x86") and has("arm")' fnpack.json.tmp >/dev/null
           mv fnpack.json.tmp fnpack.json
           git config user.name 'github-actions[bot]'
           git config user.email 'github-actions[bot]@users.noreply.github.com'
-          git add fnpack.json "$APP_ID/versions/"
+          git add fnpack.json "$APP_ID/versions"
           if git diff --cached --quiet; then
-            echo 'FnDepot 已同步，无需提交。'
-            exit 0
+            echo 'INFO | FnDepot 已是最新，无需提交'
+          else
+            git commit -m "chore(zfile): sync official fnOS FPK v${VERSION}"
+            git -c "http.https://github.com/.extraheader=$auth" push origin "HEAD:${FNDEPOT_BRANCH}"
+            echo "SUCCESS | FnDepot 已同步 v${VERSION}"
           fi
-          git commit -m "chore(zfile): sync official fnOS FPK v${VERSION}"
-          git -c "http.https://github.com/.extraheader=AUTHORIZATION: basic $(printf 'x-access-token:%s' "$FNDEPOT_PAT" | base64 -w0)" \
-            push origin "HEAD:${FNDEPOT_BRANCH}"
 
-      - name: 10. 输出运行总结
+      - name: '15. 输出本次运行总结'
         if: always()
-        shell: bash
+        env:
+          VERSION: ${{ steps.discover.outputs.version }}
+          RELEASE_EXISTS: ${{ steps.release.outputs.exists }}
+          JOB_STATUS: ${{ job.status }}
         run: |
+          set -euo pipefail
+          printf '%s | INFO | mode=%s version=%s release_exists=%s status=%s\n' "$(TZ=Asia/Shanghai date '+%F %T CST')" "$RUN_MODE" "$VERSION" "$RELEASE_EXISTS" "$JOB_STATUS"
           {
-            echo '## 运行信息'
-            echo "- 模式：${RUN_MODE}"
-            echo "- 官方目录：${SOURCE_DIR}"
-            echo "- 最新配对版本：${{ steps.discover.outputs.version }}"
-            echo "- Release 已存在：${{ steps.release.outputs.exists }}"
-            echo "- 运行结果：${{ job.status }}"
+            echo '## ZFile FPK 监控结果'
+            echo "- 运行模式：$RUN_MODE"
+            echo "- 版本：${VERSION:-未发现}"
+            echo "- Release 已存在：${RELEASE_EXISTS:-未知}"
+            echo "- 运行状态：$JOB_STATUS"
           } >> "$GITHUB_STEP_SUMMARY"
