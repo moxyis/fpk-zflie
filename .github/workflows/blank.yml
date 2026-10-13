@@ -287,17 +287,39 @@ jobs:
           VERSION: ${{ steps.remote.outputs.remote_version }}
         run: |
           set -euo pipefail
-          cd /tmp/FnDepot
-          git config user.name 'github-actions[bot]'
-          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
-          git add "$FNDEPOT_APP_DIR" fnpack.json
-          if git diff --cached --quiet; then
-            echo 'FnDepot 无文件变化，跳过提交'
-          else
-            git commit -m "chore: 同步 ZFile 官方 fnOS FPK v${VERSION}"
-            git push origin "HEAD:$FNDEPOT_BRANCH"
-            echo 'FnDepot 推送成功'
+
+          echo "开始提交 FnDepot 更新：v${VERSION}"
+
+          if [[ -z "${GH_TOKEN:-}" ]]; then
+            echo "::error::未配置 FnDepot_PAT Secret"
+            exit 1
           fi
+
+          cd /tmp/FnDepot
+
+          git config user.name 'github-actions[bot]'
+          git config user.email \
+            '41898282+github-actions[bot]@users.noreply.github.com'
+
+          echo "配置 GitHub CLI 的 Git 认证"
+          gh auth setup-git
+
+          echo "检查待提交文件"
+          git add "$FNDEPOT_APP_DIR" fnpack.json
+
+          if git diff --cached --quiet; then
+            echo "FnDepot 没有文件变化，跳过提交"
+          else
+            git commit -m \
+              "chore: 同步 ZFile 官方 fnOS FPK v${VERSION}"
+          fi
+
+          echo "开始推送 FnDepot：${FNDEPOT_BRANCH}"
+
+          git push origin "HEAD:${FNDEPOT_BRANCH}"
+
+          echo "SUCCESS | FnDepot 推送成功"
+          echo "SUCCESS | 已同步 ZFile v${VERSION}"
 
       - name: '16. 保存官方版本号到当前仓库'
         if: steps.compare.outputs.need_update == 'true' && env.DEBUG_MODE == 'false'
