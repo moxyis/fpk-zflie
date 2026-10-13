@@ -40,17 +40,17 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 35
     steps:
-      - name: 检出监控仓库
+      - name: 01. 检出监控仓库
         uses: actions/checkout@v6
 
-      - name: 安装工具
+      - name: 02. 安装工具
         shell: bash
         run: |
           set -euo pipefail
           sudo apt-get update -qq
           sudo apt-get install -y -qq curl jq unzip file
 
-      - name: 初始化运行日志
+      - name: 03. 初始化运行日志
         shell: bash
         run: |
           mkdir -p logs dist
@@ -59,15 +59,22 @@ jobs:
           echo "source=$SOURCE_DIR" >> logs/metadata.txt
           echo "mode=$RUN_MODE" >> logs/metadata.txt
 
-      - name: 发现官方最新双架构 FPK
+      - name: 04. 发现官方最新双架构 FPK
         id: discover
         shell: bash
         run: |
           set -euo pipefail
           mkdir -p logs
           exec > >(tee -a "logs/monitor.log") 2> >(tee -a "logs/monitor.log" >&2)
-          echo "$(TZ=Asia/Shanghai date '+%F %T %Z') | START | 发现官方最新双架构 FPK"
-          trap 'code=$?; echo "$(TZ=Asia/Shanghai date '''+%F %T %Z''') | ERROR | 发现官方最新双架构 FPK | exit=$code" >&2' ERR
+          STEP_NAME="发现官方最新双架构 FPK"
+          echo "$(TZ=Asia/Shanghai date '+%F %T CST') | START | ${STEP_NAME}"
+          on_step_error() {
+            local code=$?
+            trap - ERR
+            printf "%s | ERROR | step=%s | exit=%s | line=%s\n" "$(TZ=Asia/Shanghai date "+%F %T CST")" "${STEP_NAME:-unknown}" "$code" "${BASH_LINENO[0]:-unknown}" >&2
+            exit "$code"
+          }
+          trap 'on_step_error' ERR
           mkdir -p dist
           curl --fail --location --retry 3 --connect-timeout 15 --max-time 90 \
             --silent --show-error "$SOURCE_DIR" -o dist/index.html
@@ -100,7 +107,7 @@ jobs:
           echo "tag=v$VERSION" >> "$GITHUB_OUTPUT"
           echo "发现可配对版本：$VERSION"
 
-      - name: 检查现有 GitHub Release
+      - name: 05. 检查现有 GitHub Release
         id: release
         shell: bash
         env:
@@ -109,8 +116,15 @@ jobs:
           set -euo pipefail
           mkdir -p logs
           exec > >(tee -a "logs/monitor.log") 2> >(tee -a "logs/monitor.log" >&2)
-          echo "$(TZ=Asia/Shanghai date '+%F %T %Z') | START | 检查现有 GitHub Release"
-          trap 'code=$?; echo "$(TZ=Asia/Shanghai date '''+%F %T %Z''') | ERROR | 检查现有 GitHub Release | exit=$code" >&2' ERR
+          STEP_NAME="检查现有 GitHub Release"
+          echo "$(TZ=Asia/Shanghai date '+%F %T CST') | START | ${STEP_NAME}"
+          on_step_error() {
+            local code=$?
+            trap - ERR
+            printf "%s | ERROR | step=%s | exit=%s | line=%s\n" "$(TZ=Asia/Shanghai date "+%F %T CST")" "${STEP_NAME:-unknown}" "$code" "${BASH_LINENO[0]:-unknown}" >&2
+            exit "$code"
+          }
+          trap 'on_step_error' ERR
           if gh release view "$TAG" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
             echo 'exists=true' >> "$GITHUB_OUTPUT"
             echo "已存在 $TAG，不覆盖原始文件。"
@@ -118,9 +132,9 @@ jobs:
             echo 'exists=false' >> "$GITHUB_OUTPUT"
           fi
 
-      - name: 下载并验证双架构 FPK
+      - name: 06. 下载并检查双架构 FPK
         id: download
-        if: steps.release.outputs.exists != 'true' || env.FORCE_CHECK == 'true'
+        if: env.RUN_MODE == 'debug' || steps.release.outputs.exists != 'true' || env.FORCE_CHECK == 'true'
         shell: bash
         env:
           VERSION: ${{ steps.discover.outputs.version }}
@@ -128,8 +142,15 @@ jobs:
           set -euo pipefail
           mkdir -p logs
           exec > >(tee -a "logs/download.log") 2> >(tee -a "logs/download.log" >&2)
-          echo "$(TZ=Asia/Shanghai date '+%F %T %Z') | START | 下载并验证双架构 FPK"
-          trap 'code=$?; echo "$(TZ=Asia/Shanghai date '''+%F %T %Z''') | ERROR | 下载并验证双架构 FPK | exit=$code" >&2' ERR
+          STEP_NAME="下载并检查双架构 FPK"
+          echo "$(TZ=Asia/Shanghai date '+%F %T CST') | START | ${STEP_NAME}"
+          on_step_error() {
+            local code=$?
+            trap - ERR
+            printf "%s | ERROR | step=%s | exit=%s | line=%s\n" "$(TZ=Asia/Shanghai date "+%F %T CST")" "${STEP_NAME:-unknown}" "$code" "${BASH_LINENO[0]:-unknown}" >&2
+            exit "$code"
+          }
+          trap 'on_step_error' ERR
           for arch in x86 arm; do
             name="zfile-pro-${VERSION}-fnos-${arch}.fpk"
             url="${SOURCE_DIR}${name}"
@@ -156,7 +177,7 @@ jobs:
           cat dist/SHA256SUMS
           echo 'downloaded=true' >> "$GITHUB_OUTPUT"
 
-      - name: Debug 测试报告
+      - name: 07. Debug 测试报告
         if: env.RUN_MODE == 'debug'
         shell: bash
         env:
@@ -165,8 +186,15 @@ jobs:
           set -euo pipefail
           mkdir -p logs
           exec > >(tee -a "logs/monitor.log") 2> >(tee -a "logs/monitor.log" >&2)
-          echo "$(TZ=Asia/Shanghai date '+%F %T %Z') | START | Debug 测试报告"
-          trap 'code=$?; echo "$(TZ=Asia/Shanghai date '''+%F %T %Z''') | ERROR | Debug 测试报告 | exit=$code" >&2' ERR
+          STEP_NAME="Debug 测试报告"
+          echo "$(TZ=Asia/Shanghai date '+%F %T CST') | START | ${STEP_NAME}"
+          on_step_error() {
+            local code=$?
+            trap - ERR
+            printf "%s | ERROR | step=%s | exit=%s | line=%s\n" "$(TZ=Asia/Shanghai date "+%F %T CST")" "${STEP_NAME:-unknown}" "$code" "${BASH_LINENO[0]:-unknown}" >&2
+            exit "$code"
+          }
+          trap 'on_step_error' ERR
           {
             echo '## ZFile FPK Debug 检测'
             echo "- 版本：${VERSION}"
@@ -182,7 +210,7 @@ jobs:
             echo '- Debug 不会发布或修改仓库。'
           } >> "$GITHUB_STEP_SUMMARY"
 
-      - name: 上传 Debug 校验结果
+      - name: 08. 上传 Debug 校验结果
         if: env.RUN_MODE == 'debug' && steps.download.outputs.downloaded == 'true'
         uses: actions/upload-artifact@v6
         with:
@@ -192,7 +220,7 @@ jobs:
             dist/files.txt
           retention-days: 7
 
-      - name: 检查正式分发条件
+      - name: 09. 检查正式分发条件
         if: env.RUN_MODE == 'production' && steps.release.outputs.exists != 'true'
         shell: bash
         env:
@@ -201,13 +229,20 @@ jobs:
           set -euo pipefail
           mkdir -p logs
           exec > >(tee -a "logs/publish.log") 2> >(tee -a "logs/publish.log" >&2)
-          echo "$(TZ=Asia/Shanghai date '+%F %T %Z') | START | 检查正式分发条件"
-          trap 'code=$?; echo "$(TZ=Asia/Shanghai date '''+%F %T %Z''') | ERROR | 检查正式分发条件 | exit=$code" >&2' ERR
+          STEP_NAME="检查正式分发条件"
+          echo "$(TZ=Asia/Shanghai date '+%F %T CST') | START | ${STEP_NAME}"
+          on_step_error() {
+            local code=$?
+            trap - ERR
+            printf "%s | ERROR | step=%s | exit=%s | line=%s\n" "$(TZ=Asia/Shanghai date "+%F %T CST")" "${STEP_NAME:-unknown}" "$code" "${BASH_LINENO[0]:-unknown}" >&2
+            exit "$code"
+          }
+          trap 'on_step_error' ERR
           test -n "$FNDEPOT_PAT" || { echo '缺少 FnDepot_PAT Secret' >&2; exit 1; }
           test -s dist/SHA256SUMS
           echo '两个架构已下载；准备发布。'
 
-      - name: 正式发布 GitHub Release
+      - name: 10. 正式发布 GitHub Release
         if: env.RUN_MODE == 'production' && steps.release.outputs.exists != 'true'
         shell: bash
         env:
@@ -216,8 +251,15 @@ jobs:
           set -euo pipefail
           mkdir -p logs
           exec > >(tee -a "logs/publish.log") 2> >(tee -a "logs/publish.log" >&2)
-          echo "$(TZ=Asia/Shanghai date '+%F %T %Z') | START | 正式发布 GitHub Release"
-          trap 'code=$?; echo "$(TZ=Asia/Shanghai date '''+%F %T %Z''') | ERROR | 正式发布 GitHub Release | exit=$code" >&2' ERR
+          STEP_NAME="正式发布 GitHub Release"
+          echo "$(TZ=Asia/Shanghai date '+%F %T CST') | START | ${STEP_NAME}"
+          on_step_error() {
+            local code=$?
+            trap - ERR
+            printf "%s | ERROR | step=%s | exit=%s | line=%s\n" "$(TZ=Asia/Shanghai date "+%F %T CST")" "${STEP_NAME:-unknown}" "$code" "${BASH_LINENO[0]:-unknown}" >&2
+            exit "$code"
+          }
+          trap 'on_step_error' ERR
           gh release create "v${VERSION}" \
             "dist/zfile-pro-${VERSION}-fnos-x86.fpk" \
             "dist/zfile-pro-${VERSION}-fnos-arm.fpk" \
@@ -227,7 +269,7 @@ jobs:
             --notes "来源：${SOURCE_DIR}\n本 Release 原样分发官方 x86 / ARM FPK；SHA256SUMS 为镜像下载后的校验值。" \
             --latest
 
-      - name: 正式同步 FnDepot V2
+      - name: 11. 正式同步 FnDepot V2
         if: env.RUN_MODE == 'production'
         shell: bash
         env:
@@ -237,8 +279,15 @@ jobs:
           set -euo pipefail
           mkdir -p logs
           exec > >(tee -a "logs/publish.log") 2> >(tee -a "logs/publish.log" >&2)
-          echo "$(TZ=Asia/Shanghai date '+%F %T %Z') | START | 正式同步 FnDepot V2"
-          trap 'code=$?; echo "$(TZ=Asia/Shanghai date '''+%F %T %Z''') | ERROR | 正式同步 FnDepot V2 | exit=$code" >&2' ERR
+          STEP_NAME="正式同步 FnDepot V2"
+          echo "$(TZ=Asia/Shanghai date '+%F %T CST') | START | ${STEP_NAME}"
+          on_step_error() {
+            local code=$?
+            trap - ERR
+            printf "%s | ERROR | step=%s | exit=%s | line=%s\n" "$(TZ=Asia/Shanghai date "+%F %T CST")" "${STEP_NAME:-unknown}" "$code" "${BASH_LINENO[0]:-unknown}" >&2
+            exit "$code"
+          }
+          trap 'on_step_error' ERR
           test -n "$FNDEPOT_PAT" || { echo '缺少 FnDepot_PAT Secret' >&2; exit 1; }
           # Release 可能在之前的运行中已创建；从 GitHub 下载可实现失败重试。
           mkdir -p /tmp/zfile-assets
@@ -296,7 +345,7 @@ jobs:
           git -c "http.https://github.com/.extraheader=AUTHORIZATION: basic $(printf 'x-access-token:%s' "$FNDEPOT_PAT" | base64 -w0)" \
             push origin "HEAD:${FNDEPOT_BRANCH}"
 
-      - name: 归档运行日志
+      - name: 12. 归档运行日志
         if: always()
         uses: actions/upload-artifact@v6
         with:
@@ -309,7 +358,7 @@ jobs:
           if-no-files-found: warn
           retention-days: 30
 
-      - name: 输出运行总结
+      - name: 13. 输出运行总结
         if: always()
         shell: bash
         run: |
