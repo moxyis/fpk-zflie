@@ -4,32 +4,58 @@ name: Actions 实时步骤显示测试
 on:
   workflow_dispatch:
 
+env:
+  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: "true"
+
 jobs:
-  build:
-    runs-on: ubuntu-24.04
+  build-multi-arch:
+    runs-on: ubuntu-latest
+
+    permissions:
+      contents: write
+      pull-requests: read
+
     steps:
-      - name: "1. 读取官方版本号"
+      - name: "1. 检出仓库"
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: "2. 初始化环境"
         shell: bash
         run: |
           set -euo pipefail
-          echo "开始读取官方版本..."
-          curl -fLsS --max-time 30 \
+          echo "开始初始化环境"
+          echo "Runner: $RUNNER_OS"
+          echo "仓库: $GITHUB_REPOSITORY"
+          echo "时间: $(date '+%F %T')"
+          echo "初始化完成"
+
+      - name: "3. 获取官方最新版本"
+        shell: bash
+        run: |
+          set -euo pipefail
+          echo "开始请求 ZFile 官方目录"
+
+          curl -fLsS --retry 3 --max-time 30 \
             https://c.jun6.net/ZFILE-PRO/ \
             -o /tmp/zfile-index.html
+
           echo "官方目录读取成功"
           grep -Eo 'zfile-pro-[0-9]+\.[0-9]+\.[0-9]+-fnos-(x86|arm)\.fpk' \
             /tmp/zfile-index.html | sort -u
 
-      - name: "2. 测试实时日志输出"
+      - name: "4. 测试实时日志"
         shell: bash
         run: |
           set -euo pipefail
-          for i in 1 2 3 4 5; do
-            echo "$(date '+%F %T') | 正在执行第 $i 次检查"
+          for i in {1..10}; do
+            echo "$(date '+%F %T') | 正在执行第 $i/10 次检查"
             sleep 2
           done
           echo "实时日志测试完成"
 
-      - name: "3. 测试成功状态"
+      - name: "5. 测试最终结果"
+        shell: bash
         run: |
-          echo "SUCCESS | 步骤执行成功"
+          echo "SUCCESS | 全部测试步骤执行完成"
