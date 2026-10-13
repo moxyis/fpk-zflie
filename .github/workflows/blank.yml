@@ -50,22 +50,11 @@ jobs:
           sudo apt-get update -qq
           sudo apt-get install -y -qq curl jq unzip file
 
-      - name: 03. 初始化运行日志
-        shell: bash
-        run: |
-          mkdir -p logs dist
-          echo "$(TZ=Asia/Shanghai date '+%F %T %Z') | INFO | run=$GITHUB_RUN_ID mode=$RUN_MODE | 监控开始" > logs/monitor.log
-          echo "run_id=$GITHUB_RUN_ID" > logs/metadata.txt
-          echo "source=$SOURCE_DIR" >> logs/metadata.txt
-          echo "mode=$RUN_MODE" >> logs/metadata.txt
-
-      - name: 04. 发现官方最新双架构 FPK
+      - name: 03. 发现官方最新双架构 FPK
         id: discover
         shell: bash
         run: |
           set -euo pipefail
-          mkdir -p logs
-          exec > >(tee -a "logs/monitor.log") 2> >(tee -a "logs/monitor.log" >&2)
           STEP_NAME="发现官方最新双架构 FPK"
           echo "$(TZ=Asia/Shanghai date '+%F %T CST') | START | ${STEP_NAME}"
           on_step_error() {
@@ -105,17 +94,15 @@ jobs:
           fi
           echo "version=$VERSION" >> "$GITHUB_OUTPUT"
           echo "tag=v$VERSION" >> "$GITHUB_OUTPUT"
-          echo "发现可配对版本：$VERSION"
+          echo "$(TZ=Asia/Shanghai date '+%F %T CST') | INFO | 配对成功 version=$VERSION"
 
-      - name: 05. 检查现有 GitHub Release
+      - name: 04. 检查现有 GitHub Release
         id: release
         shell: bash
         env:
           TAG: ${{ steps.discover.outputs.tag }}
         run: |
           set -euo pipefail
-          mkdir -p logs
-          exec > >(tee -a "logs/monitor.log") 2> >(tee -a "logs/monitor.log" >&2)
           STEP_NAME="检查现有 GitHub Release"
           echo "$(TZ=Asia/Shanghai date '+%F %T CST') | START | ${STEP_NAME}"
           on_step_error() {
@@ -132,7 +119,7 @@ jobs:
             echo 'exists=false' >> "$GITHUB_OUTPUT"
           fi
 
-      - name: 06. 下载并检查双架构 FPK
+      - name: 05. 下载并检查双架构 FPK
         id: download
         if: env.RUN_MODE == 'debug' || steps.release.outputs.exists != 'true' || env.FORCE_CHECK == 'true'
         shell: bash
@@ -140,8 +127,6 @@ jobs:
           VERSION: ${{ steps.discover.outputs.version }}
         run: |
           set -euo pipefail
-          mkdir -p logs
-          exec > >(tee -a "logs/download.log") 2> >(tee -a "logs/download.log" >&2)
           STEP_NAME="下载并检查双架构 FPK"
           echo "$(TZ=Asia/Shanghai date '+%F %T CST') | START | ${STEP_NAME}"
           on_step_error() {
@@ -154,7 +139,7 @@ jobs:
           for arch in x86 arm; do
             name="zfile-pro-${VERSION}-fnos-${arch}.fpk"
             url="${SOURCE_DIR}${name}"
-            echo "下载 $url"
+            echo "$(TZ=Asia/Shanghai date '+%F %T CST') | INFO | 下载 $url"
             curl --fail --location --retry 3 --retry-all-errors \
               --connect-timeout 20 --max-time 600 \
               --silent --show-error "$url" -o "dist/${name}.part"
@@ -176,16 +161,15 @@ jobs:
             "zfile-pro-${VERSION}-fnos-arm.fpk" > SHA256SUMS)
           cat dist/SHA256SUMS
           echo 'downloaded=true' >> "$GITHUB_OUTPUT"
+          echo "$(TZ=Asia/Shanghai date '+%F %T CST') | SUCCESS | 两架构 FPK 下载和完整性检查通过"
 
-      - name: 07. Debug 测试报告
+      - name: 06. Debug 测试报告
         if: env.RUN_MODE == 'debug'
         shell: bash
         env:
           VERSION: ${{ steps.discover.outputs.version }}
         run: |
           set -euo pipefail
-          mkdir -p logs
-          exec > >(tee -a "logs/monitor.log") 2> >(tee -a "logs/monitor.log" >&2)
           STEP_NAME="Debug 测试报告"
           echo "$(TZ=Asia/Shanghai date '+%F %T CST') | START | ${STEP_NAME}"
           on_step_error() {
@@ -210,25 +194,13 @@ jobs:
             echo '- Debug 不会发布或修改仓库。'
           } >> "$GITHUB_STEP_SUMMARY"
 
-      - name: 08. 上传 Debug 校验结果
-        if: env.RUN_MODE == 'debug' && steps.download.outputs.downloaded == 'true'
-        uses: actions/upload-artifact@v6
-        with:
-          name: zfile-debug-${{ steps.discover.outputs.version }}
-          path: |
-            dist/SHA256SUMS
-            dist/files.txt
-          retention-days: 7
-
-      - name: 09. 检查正式分发条件
+      - name: 07. 检查正式分发条件
         if: env.RUN_MODE == 'production' && steps.release.outputs.exists != 'true'
         shell: bash
         env:
           FNDEPOT_PAT: ${{ secrets.FnDepot_PAT }}
         run: |
           set -euo pipefail
-          mkdir -p logs
-          exec > >(tee -a "logs/publish.log") 2> >(tee -a "logs/publish.log" >&2)
           STEP_NAME="检查正式分发条件"
           echo "$(TZ=Asia/Shanghai date '+%F %T CST') | START | ${STEP_NAME}"
           on_step_error() {
@@ -242,15 +214,13 @@ jobs:
           test -s dist/SHA256SUMS
           echo '两个架构已下载；准备发布。'
 
-      - name: 10. 正式发布 GitHub Release
+      - name: 08. 正式发布 GitHub Release
         if: env.RUN_MODE == 'production' && steps.release.outputs.exists != 'true'
         shell: bash
         env:
           VERSION: ${{ steps.discover.outputs.version }}
         run: |
           set -euo pipefail
-          mkdir -p logs
-          exec > >(tee -a "logs/publish.log") 2> >(tee -a "logs/publish.log" >&2)
           STEP_NAME="正式发布 GitHub Release"
           echo "$(TZ=Asia/Shanghai date '+%F %T CST') | START | ${STEP_NAME}"
           on_step_error() {
@@ -269,7 +239,7 @@ jobs:
             --notes "来源：${SOURCE_DIR}\n本 Release 原样分发官方 x86 / ARM FPK；SHA256SUMS 为镜像下载后的校验值。" \
             --latest
 
-      - name: 11. 正式同步 FnDepot V2
+      - name: 09. 正式同步 FnDepot V2
         if: env.RUN_MODE == 'production'
         shell: bash
         env:
@@ -277,8 +247,6 @@ jobs:
           FNDEPOT_PAT: ${{ secrets.FnDepot_PAT }}
         run: |
           set -euo pipefail
-          mkdir -p logs
-          exec > >(tee -a "logs/publish.log") 2> >(tee -a "logs/publish.log" >&2)
           STEP_NAME="正式同步 FnDepot V2"
           echo "$(TZ=Asia/Shanghai date '+%F %T CST') | START | ${STEP_NAME}"
           on_step_error() {
@@ -345,20 +313,7 @@ jobs:
           git -c "http.https://github.com/.extraheader=AUTHORIZATION: basic $(printf 'x-access-token:%s' "$FNDEPOT_PAT" | base64 -w0)" \
             push origin "HEAD:${FNDEPOT_BRANCH}"
 
-      - name: 12. 归档运行日志
-        if: always()
-        uses: actions/upload-artifact@v6
-        with:
-          name: zfile-monitor-logs-${{ github.run_id }}
-          path: |
-            logs/
-            dist/files.txt
-            dist/versions.txt
-            dist/SHA256SUMS
-          if-no-files-found: warn
-          retention-days: 30
-
-      - name: 13. 输出运行总结
+      - name: 10. 输出运行总结
         if: always()
         shell: bash
         run: |
@@ -368,6 +323,5 @@ jobs:
             echo "- 官方目录：${SOURCE_DIR}"
             echo "- 最新配对版本：${{ steps.discover.outputs.version }}"
             echo "- Release 已存在：${{ steps.release.outputs.exists }}"
-            echo "- 日志归档：zfile-monitor-logs-${GITHUB_RUN_ID}（保留 30 天）"
             echo "- 运行结果：${{ job.status }}"
           } >> "$GITHUB_STEP_SUMMARY"
