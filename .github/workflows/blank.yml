@@ -51,8 +51,24 @@ jobs:
       - name: '2. 检查基础工具与 Node.js 24 Actions 环境'
         run: |
           set -Eeuo pipefail
+          STEP_TITLE='2. 检查基础工具与 Node.js 24 Actions 环境'
+          log() { printf '%s | %s | %s\n' "$(TZ=Asia/Shanghai date '+%F %T CST')" "$STEP_TITLE" "$*"; }
+          log 'START | 步骤开始执行'
+          heartbeat_pid=''
+          finish_step() {
+            rc=$?
+            trap - EXIT
+            if [ -n "$heartbeat_pid" ]; then
+              kill "$heartbeat_pid" 2>/dev/null || true
+              wait "$heartbeat_pid" 2>/dev/null || true
+            fi
+            if [ "$rc" -eq 0 ]; then log 'SUCCESS | 步骤执行完毕'; else log "ERROR | 步骤失败，退出码=$rc"; fi
+            exit "$rc"
+          }
+          trap finish_step EXIT
           for tool in curl jq gh tar unzip sha256sum sort grep sed git file; do
             command -v "$tool" >/dev/null || { echo "ERROR | 缺少命令: $tool"; exit 1; }
+            log "CHECK | $tool 已就绪"
           done
           mkdir -p dist
           printf '%s | INFO | run=%s mode=%s | 初始化成功，Actions JavaScript runtime=Node.js 24\n' \
@@ -61,8 +77,29 @@ jobs:
       - name: '3. 读取 ZFile 官方 FPK 目录'
         run: |
           set -Eeuo pipefail
+          STEP_TITLE='3. 读取 ZFile 官方 FPK 目录'
+          log() { printf '%s | %s | %s\n' "$(TZ=Asia/Shanghai date '+%F %T CST')" "$STEP_TITLE" "$*"; }
+          log 'START | 步骤开始执行'
+          heartbeat_pid=''
+          finish_step() {
+            rc=$?
+            trap - EXIT
+            if [ -n "$heartbeat_pid" ]; then
+              kill "$heartbeat_pid" 2>/dev/null || true
+              wait "$heartbeat_pid" 2>/dev/null || true
+            fi
+            if [ "$rc" -eq 0 ]; then log 'SUCCESS | 步骤执行完毕'; else log "ERROR | 步骤失败，退出码=$rc"; fi
+            exit "$rc"
+          }
+          trap finish_step EXIT
+          (
+            while sleep 5; do
+              printf '%s | %s | RUNNING | 正在执行，请等待...\n' "$(TZ=Asia/Shanghai date '+%F %T CST')" "$STEP_TITLE"
+            done
+          ) &
+          heartbeat_pid=$!
           printf '%s | START | 读取官方目录 %s\n' "$(TZ=Asia/Shanghai date '+%F %T CST')" "$SOURCE_DIR"
-          curl --fail --location --show-error --silent --retry 3 --connect-timeout 15 --max-time 90 \
+          curl --fail --location --show-error --progress-bar --retry 3 --connect-timeout 15 --max-time 90 \
             "$SOURCE_DIR" -o dist/index.html
           test -s dist/index.html || { echo 'ERROR | 官方目录为空'; exit 1; }
           printf '%s | SUCCESS | 官方目录已读取：%s bytes\n' \
@@ -71,6 +108,21 @@ jobs:
       - name: '4. 识别官方 FPK 文件名称'
         run: |
           set -Eeuo pipefail
+          STEP_TITLE='4. 识别官方 FPK 文件名称'
+          log() { printf '%s | %s | %s\n' "$(TZ=Asia/Shanghai date '+%F %T CST')" "$STEP_TITLE" "$*"; }
+          log 'START | 步骤开始执行'
+          heartbeat_pid=''
+          finish_step() {
+            rc=$?
+            trap - EXIT
+            if [ -n "$heartbeat_pid" ]; then
+              kill "$heartbeat_pid" 2>/dev/null || true
+              wait "$heartbeat_pid" 2>/dev/null || true
+            fi
+            if [ "$rc" -eq 0 ]; then log 'SUCCESS | 步骤执行完毕'; else log "ERROR | 步骤失败，退出码=$rc"; fi
+            exit "$rc"
+          }
+          trap finish_step EXIT
           grep -Eo 'zfile-pro-[0-9]+\.[0-9]+\.[0-9]+-fnos-(x86|arm)\.fpk' \
             dist/index.html | sort -u > dist/files.txt || true
           test -s dist/files.txt || { echo 'ERROR | 没有发现官方飞牛 FPK 文件'; exit 1; }
@@ -82,8 +134,24 @@ jobs:
         id: discover
         run: |
           set -Eeuo pipefail
+          STEP_TITLE='5. 检查最新版本 x86 和 ARM 是否齐全'
+          log() { printf '%s | %s | %s\n' "$(TZ=Asia/Shanghai date '+%F %T CST')" "$STEP_TITLE" "$*"; }
+          log 'START | 步骤开始执行'
+          heartbeat_pid=''
+          finish_step() {
+            rc=$?
+            trap - EXIT
+            if [ -n "$heartbeat_pid" ]; then
+              kill "$heartbeat_pid" 2>/dev/null || true
+              wait "$heartbeat_pid" 2>/dev/null || true
+            fi
+            if [ "$rc" -eq 0 ]; then log 'SUCCESS | 步骤执行完毕'; else log "ERROR | 步骤失败，退出码=$rc"; fi
+            exit "$rc"
+          }
+          trap finish_step EXIT
           sed -nE 's/^zfile-pro-([0-9]+\.[0-9]+\.[0-9]+)-fnos-(x86|arm)\.fpk$/\1/p' \
             dist/files.txt | sort -Vu > dist/versions.txt
+          log "CHECK | 候选版本列表：$(tr '\n' ' ' < dist/versions.txt)"
           version=''
           while IFS= read -r candidate; do
             if grep -Fxq "zfile-pro-${candidate}-fnos-x86.fpk" dist/files.txt \
@@ -105,6 +173,21 @@ jobs:
           VERSION: ${{ steps.discover.outputs.version }}
         run: |
           set -Eeuo pipefail
+          STEP_TITLE='6. 对比仓库已成功分发版本'
+          log() { printf '%s | %s | %s\n' "$(TZ=Asia/Shanghai date '+%F %T CST')" "$STEP_TITLE" "$*"; }
+          log 'START | 步骤开始执行'
+          heartbeat_pid=''
+          finish_step() {
+            rc=$?
+            trap - EXIT
+            if [ -n "$heartbeat_pid" ]; then
+              kill "$heartbeat_pid" 2>/dev/null || true
+              wait "$heartbeat_pid" 2>/dev/null || true
+            fi
+            if [ "$rc" -eq 0 ]; then log 'SUCCESS | 步骤执行完毕'; else log "ERROR | 步骤失败，退出码=$rc"; fi
+            exit "$rc"
+          }
+          trap finish_step EXIT
           if [ ! -f version.json ]; then
             echo 'INFO | version.json 不存在，首次运行将以 Release 和 FnDepot 为准'
             echo 'previous=' >> "$GITHUB_OUTPUT"
@@ -128,6 +211,21 @@ jobs:
           TAG: ${{ steps.discover.outputs.tag }}
         run: |
           set -Eeuo pipefail
+          STEP_TITLE='7. 检查 GitHub Release 是否已发布'
+          log() { printf '%s | %s | %s\n' "$(TZ=Asia/Shanghai date '+%F %T CST')" "$STEP_TITLE" "$*"; }
+          log 'START | 步骤开始执行'
+          heartbeat_pid=''
+          finish_step() {
+            rc=$?
+            trap - EXIT
+            if [ -n "$heartbeat_pid" ]; then
+              kill "$heartbeat_pid" 2>/dev/null || true
+              wait "$heartbeat_pid" 2>/dev/null || true
+            fi
+            if [ "$rc" -eq 0 ]; then log 'SUCCESS | 步骤执行完毕'; else log "ERROR | 步骤失败，退出码=$rc"; fi
+            exit "$rc"
+          }
+          trap finish_step EXIT
           if gh release view "$TAG" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
             echo 'exists=true' >> "$GITHUB_OUTPUT"
             echo "INFO | $TAG 已存在，不覆盖 Release；正式模式仍检查 FnDepot 是否同步"
@@ -142,9 +240,30 @@ jobs:
           VERSION: ${{ steps.discover.outputs.version }}
         run: |
           set -Eeuo pipefail
+          STEP_TITLE='8. 下载 x86 官方 FPK'
+          log() { printf '%s | %s | %s\n' "$(TZ=Asia/Shanghai date '+%F %T CST')" "$STEP_TITLE" "$*"; }
+          log 'START | 步骤开始执行'
+          heartbeat_pid=''
+          finish_step() {
+            rc=$?
+            trap - EXIT
+            if [ -n "$heartbeat_pid" ]; then
+              kill "$heartbeat_pid" 2>/dev/null || true
+              wait "$heartbeat_pid" 2>/dev/null || true
+            fi
+            if [ "$rc" -eq 0 ]; then log 'SUCCESS | 步骤执行完毕'; else log "ERROR | 步骤失败，退出码=$rc"; fi
+            exit "$rc"
+          }
+          trap finish_step EXIT
+          (
+            while sleep 5; do
+              printf '%s | %s | RUNNING | 正在执行，请等待...\n' "$(TZ=Asia/Shanghai date '+%F %T CST')" "$STEP_TITLE"
+            done
+          ) &
+          heartbeat_pid=$!
           name="zfile-pro-${VERSION}-fnos-x86.fpk"
           echo "$(TZ=Asia/Shanghai date '+%F %T CST') | START | 下载 $name"
-          curl --fail --location --show-error --silent --retry 3 --retry-all-errors \
+          curl --fail --location --show-error --progress-bar --retry 3 --retry-all-errors \
             --connect-timeout 20 --max-time 900 "${SOURCE_DIR}${name}" -o "dist/${name}.part"
           test -s "dist/${name}.part"
           mv "dist/${name}.part" "dist/$name"
@@ -156,9 +275,30 @@ jobs:
           VERSION: ${{ steps.discover.outputs.version }}
         run: |
           set -Eeuo pipefail
+          STEP_TITLE='9. 下载 ARM 官方 FPK'
+          log() { printf '%s | %s | %s\n' "$(TZ=Asia/Shanghai date '+%F %T CST')" "$STEP_TITLE" "$*"; }
+          log 'START | 步骤开始执行'
+          heartbeat_pid=''
+          finish_step() {
+            rc=$?
+            trap - EXIT
+            if [ -n "$heartbeat_pid" ]; then
+              kill "$heartbeat_pid" 2>/dev/null || true
+              wait "$heartbeat_pid" 2>/dev/null || true
+            fi
+            if [ "$rc" -eq 0 ]; then log 'SUCCESS | 步骤执行完毕'; else log "ERROR | 步骤失败，退出码=$rc"; fi
+            exit "$rc"
+          }
+          trap finish_step EXIT
+          (
+            while sleep 5; do
+              printf '%s | %s | RUNNING | 正在执行，请等待...\n' "$(TZ=Asia/Shanghai date '+%F %T CST')" "$STEP_TITLE"
+            done
+          ) &
+          heartbeat_pid=$!
           name="zfile-pro-${VERSION}-fnos-arm.fpk"
           echo "$(TZ=Asia/Shanghai date '+%F %T CST') | START | 下载 $name"
-          curl --fail --location --show-error --silent --retry 3 --retry-all-errors \
+          curl --fail --location --show-error --progress-bar --retry 3 --retry-all-errors \
             --connect-timeout 20 --max-time 900 "${SOURCE_DIR}${name}" -o "dist/${name}.part"
           test -s "dist/${name}.part"
           mv "dist/${name}.part" "dist/$name"
@@ -170,6 +310,21 @@ jobs:
           VERSION: ${{ steps.discover.outputs.version }}
         run: |
           set -Eeuo pipefail
+          STEP_TITLE='10. 检查 FPK 格式和计算 SHA-256'
+          log() { printf '%s | %s | %s\n' "$(TZ=Asia/Shanghai date '+%F %T CST')" "$STEP_TITLE" "$*"; }
+          log 'START | 步骤开始执行'
+          heartbeat_pid=''
+          finish_step() {
+            rc=$?
+            trap - EXIT
+            if [ -n "$heartbeat_pid" ]; then
+              kill "$heartbeat_pid" 2>/dev/null || true
+              wait "$heartbeat_pid" 2>/dev/null || true
+            fi
+            if [ "$rc" -eq 0 ]; then log 'SUCCESS | 步骤执行完毕'; else log "ERROR | 步骤失败，退出码=$rc"; fi
+            exit "$rc"
+          }
+          trap finish_step EXIT
           for arch in x86 arm; do
             name="zfile-pro-${VERSION}-fnos-${arch}.fpk"
             test -s "dist/$name"
@@ -192,6 +347,21 @@ jobs:
           VERSION: ${{ steps.discover.outputs.version }}
         run: |
           set -Eeuo pipefail
+          STEP_TITLE='11. Debug 模式：输出检测结果'
+          log() { printf '%s | %s | %s\n' "$(TZ=Asia/Shanghai date '+%F %T CST')" "$STEP_TITLE" "$*"; }
+          log 'START | 步骤开始执行'
+          heartbeat_pid=''
+          finish_step() {
+            rc=$?
+            trap - EXIT
+            if [ -n "$heartbeat_pid" ]; then
+              kill "$heartbeat_pid" 2>/dev/null || true
+              wait "$heartbeat_pid" 2>/dev/null || true
+            fi
+            if [ "$rc" -eq 0 ]; then log 'SUCCESS | 步骤执行完毕'; else log "ERROR | 步骤失败，退出码=$rc"; fi
+            exit "$rc"
+          }
+          trap finish_step EXIT
           echo "SUCCESS | Debug 已完成，版本=$VERSION；不发布 Release、不写入 FnDepot、不修改 version.json"
           cat dist/SHA256SUMS
 
@@ -202,6 +372,21 @@ jobs:
           RELEASE_EXISTS: ${{ steps.release.outputs.exists }}
         run: |
           set -Eeuo pipefail
+          STEP_TITLE='12. Production：检查分发权限和必要文件'
+          log() { printf '%s | %s | %s\n' "$(TZ=Asia/Shanghai date '+%F %T CST')" "$STEP_TITLE" "$*"; }
+          log 'START | 步骤开始执行'
+          heartbeat_pid=''
+          finish_step() {
+            rc=$?
+            trap - EXIT
+            if [ -n "$heartbeat_pid" ]; then
+              kill "$heartbeat_pid" 2>/dev/null || true
+              wait "$heartbeat_pid" 2>/dev/null || true
+            fi
+            if [ "$rc" -eq 0 ]; then log 'SUCCESS | 步骤执行完毕'; else log "ERROR | 步骤失败，退出码=$rc"; fi
+            exit "$rc"
+          }
+          trap finish_step EXIT
           test -n "$FNDEPOT_PAT" || { echo 'ERROR | 未配置 FnDepot_PAT'; exit 1; }
           if [ "$RELEASE_EXISTS" != 'true' ]; then
             test -s dist/SHA256SUMS || { echo 'ERROR | 缺少新下载 FPK 的 SHA256SUMS'; exit 1; }
@@ -214,6 +399,27 @@ jobs:
           VERSION: ${{ steps.discover.outputs.version }}
         run: |
           set -Eeuo pipefail
+          STEP_TITLE='13. Production：创建 GitHub Release'
+          log() { printf '%s | %s | %s\n' "$(TZ=Asia/Shanghai date '+%F %T CST')" "$STEP_TITLE" "$*"; }
+          log 'START | 步骤开始执行'
+          heartbeat_pid=''
+          finish_step() {
+            rc=$?
+            trap - EXIT
+            if [ -n "$heartbeat_pid" ]; then
+              kill "$heartbeat_pid" 2>/dev/null || true
+              wait "$heartbeat_pid" 2>/dev/null || true
+            fi
+            if [ "$rc" -eq 0 ]; then log 'SUCCESS | 步骤执行完毕'; else log "ERROR | 步骤失败，退出码=$rc"; fi
+            exit "$rc"
+          }
+          trap finish_step EXIT
+          (
+            while sleep 5; do
+              printf '%s | %s | RUNNING | 正在执行，请等待...\n' "$(TZ=Asia/Shanghai date '+%F %T CST')" "$STEP_TITLE"
+            done
+          ) &
+          heartbeat_pid=$!
           gh release create "v${VERSION}" \
             "dist/zfile-pro-${VERSION}-fnos-x86.fpk" \
             "dist/zfile-pro-${VERSION}-fnos-arm.fpk" \
@@ -229,6 +435,27 @@ jobs:
           VERSION: ${{ steps.discover.outputs.version }}
         run: |
           set -Eeuo pipefail
+          STEP_TITLE='14. Production：验证 GitHub Release 双架构文件'
+          log() { printf '%s | %s | %s\n' "$(TZ=Asia/Shanghai date '+%F %T CST')" "$STEP_TITLE" "$*"; }
+          log 'START | 步骤开始执行'
+          heartbeat_pid=''
+          finish_step() {
+            rc=$?
+            trap - EXIT
+            if [ -n "$heartbeat_pid" ]; then
+              kill "$heartbeat_pid" 2>/dev/null || true
+              wait "$heartbeat_pid" 2>/dev/null || true
+            fi
+            if [ "$rc" -eq 0 ]; then log 'SUCCESS | 步骤执行完毕'; else log "ERROR | 步骤失败，退出码=$rc"; fi
+            exit "$rc"
+          }
+          trap finish_step EXIT
+          (
+            while sleep 5; do
+              printf '%s | %s | RUNNING | 正在执行，请等待...\n' "$(TZ=Asia/Shanghai date '+%F %T CST')" "$STEP_TITLE"
+            done
+          ) &
+          heartbeat_pid=$!
           mkdir -p /tmp/zfile-release
           gh release download "v${VERSION}" --repo "$GITHUB_REPOSITORY" \
             --pattern "zfile-pro-${VERSION}-fnos-*.fpk" --pattern SHA256SUMS \
@@ -243,10 +470,32 @@ jobs:
           FNDEPOT_PAT: ${{ secrets.FnDepot_PAT }}
         run: |
           set -Eeuo pipefail
+          STEP_TITLE='15. Production：同步 FnDepot V2 应用源'
+          log() { printf '%s | %s | %s\n' "$(TZ=Asia/Shanghai date '+%F %T CST')" "$STEP_TITLE" "$*"; }
+          log 'START | 步骤开始执行'
+          heartbeat_pid=''
+          finish_step() {
+            rc=$?
+            trap - EXIT
+            if [ -n "$heartbeat_pid" ]; then
+              kill "$heartbeat_pid" 2>/dev/null || true
+              wait "$heartbeat_pid" 2>/dev/null || true
+            fi
+            if [ "$rc" -eq 0 ]; then log 'SUCCESS | 步骤执行完毕'; else log "ERROR | 步骤失败，退出码=$rc"; fi
+            exit "$rc"
+          }
+          trap finish_step EXIT
+          (
+            while sleep 5; do
+              printf '%s | %s | RUNNING | 正在执行，请等待...\n' "$(TZ=Asia/Shanghai date '+%F %T CST')" "$STEP_TITLE"
+            done
+          ) &
+          heartbeat_pid=$!
           auth="AUTHORIZATION: basic $(printf 'x-access-token:%s' "$FNDEPOT_PAT" | base64 -w0)"
           git -c "http.https://github.com/.extraheader=$auth" clone \
             --depth 1 --branch "$FNDEPOT_BRANCH" \
             "https://github.com/${FNDEPOT_REPO}.git" /tmp/FnDepot
+          log "CHECK | FnDepot 仓库克隆完成"
           cd /tmp/FnDepot
           jq -e --arg app "$APP_ID" '.schema_version == "2" and (.apps[$app] | type == "object")' fnpack.json >/dev/null
           mkdir -p "$APP_ID/versions"
@@ -277,6 +526,7 @@ jobs:
           mv fnpack.json.tmp fnpack.json
           git config user.name 'github-actions[bot]'
           git config user.email 'github-actions[bot]@users.noreply.github.com'
+          log "CHECK | 双架构 FPK 已复制，元数据已更新"
           git add fnpack.json "$APP_ID/versions"
           if git diff --cached --quiet; then
             echo 'INFO | FnDepot 内容未变化，跳过提交'
@@ -292,6 +542,27 @@ jobs:
           VERSION: ${{ steps.discover.outputs.version }}
         run: |
           set -Eeuo pipefail
+          STEP_TITLE='16. Production：保存成功分发版本到仓库'
+          log() { printf '%s | %s | %s\n' "$(TZ=Asia/Shanghai date '+%F %T CST')" "$STEP_TITLE" "$*"; }
+          log 'START | 步骤开始执行'
+          heartbeat_pid=''
+          finish_step() {
+            rc=$?
+            trap - EXIT
+            if [ -n "$heartbeat_pid" ]; then
+              kill "$heartbeat_pid" 2>/dev/null || true
+              wait "$heartbeat_pid" 2>/dev/null || true
+            fi
+            if [ "$rc" -eq 0 ]; then log 'SUCCESS | 步骤执行完毕'; else log "ERROR | 步骤失败，退出码=$rc"; fi
+            exit "$rc"
+          }
+          trap finish_step EXIT
+          (
+            while sleep 5; do
+              printf '%s | %s | RUNNING | 正在执行，请等待...\n' "$(TZ=Asia/Shanghai date '+%F %T CST')" "$STEP_TITLE"
+            done
+          ) &
+          heartbeat_pid=$!
           # 只有 FnDepot 同步成功后才执行，避免中途失败导致版本状态提前更新
           x="/tmp/zfile-release/zfile-pro-${VERSION}-fnos-x86.fpk"
           a="/tmp/zfile-release/zfile-pro-${VERSION}-fnos-arm.fpk"
@@ -331,6 +602,21 @@ jobs:
           JOB_STATUS: ${{ job.status }}
         run: |
           set -Eeuo pipefail
+          STEP_TITLE='17. 运行结束：控制台总结'
+          log() { printf '%s | %s | %s\n' "$(TZ=Asia/Shanghai date '+%F %T CST')" "$STEP_TITLE" "$*"; }
+          log 'START | 步骤开始执行'
+          heartbeat_pid=''
+          finish_step() {
+            rc=$?
+            trap - EXIT
+            if [ -n "$heartbeat_pid" ]; then
+              kill "$heartbeat_pid" 2>/dev/null || true
+              wait "$heartbeat_pid" 2>/dev/null || true
+            fi
+            if [ "$rc" -eq 0 ]; then log 'SUCCESS | 步骤执行完毕'; else log "ERROR | 步骤失败，退出码=$rc"; fi
+            exit "$rc"
+          }
+          trap finish_step EXIT
           printf '%s | INFO | mode=%s version=%s release_exists=%s status=%s\n' \
             "$(TZ=Asia/Shanghai date '+%F %T CST')" \
             "$RUN_MODE" "${VERSION:-unknown}" "${RELEASE_EXISTS:-unknown}" "$JOB_STATUS"
