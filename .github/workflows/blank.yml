@@ -1,50 +1,334 @@
-
-name: Actions 双仓库步骤对照测试
+name: ZFile 官方 FPK 监控与分发
 
 on:
   workflow_dispatch:
+    inputs:
+      debug_mode:
+        description: 'true=只检查和下载，不发布；false=正式分发'
+        required: true
+        default: 'true'
+        type: choice
+        options:
+          - 'true'
+          - 'false'
+  schedule:
+    - cron: '0 */6 * * *'
 
-permissions:
-  contents: read
+env:
+  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: 'true'
+  DEBUG_MODE: ${{ github.event.inputs.debug_mode || 'false' }}
+  SOURCE_URL: https://c.jun6.net/ZFILE-PRO/
+  VERSION_FILE: upstream-version.txt
+  PACKAGE_DIR: /tmp/zfile-official-fpk
+  FNDEPOT_REPO: moxyis/FnDepot
+  FNDEPOT_BRANCH: main
+  FNDEPOT_APP_DIR: fpk-zflie
+  APP_ID: fpk-zflie
 
 jobs:
-  build:
+  build-multi-arch:
+    name: build-multi-arch
     runs-on: ubuntu-latest
-
+    permissions:
+      contents: write
     steps:
-      - name: "1. 检出仓库"
+      - name: '1. 检出仓库'
         uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          persist-credentials: true
 
-      - name: "2. 检查运行环境"
+      - name: '2. 初始化运行环境'
+        id: init
         shell: bash
         run: |
           set -euo pipefail
-          echo "Runner: $RUNNER_OS"
-          echo "开始环境检查"
-          uname -a
-          echo "环境检查成功"
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          mkdir -p "$PACKAGE_DIR"
+          echo "运行模式：$DEBUG_MODE"
+          echo "仓库：$GITHUB_REPOSITORY"
+          echo "分支：$GITHUB_REF_NAME"
+          echo "官方目录：$SOURCE_URL"
+          echo "时间：$(TZ=Asia/Shanghai date '+%F %T %Z')"
+          for cmd in curl python3 jq gh git sha256sum; do command -v "$cmd"; done
+          echo '环境初始化完成'
 
-      - name: "3. 模拟版本检查"
+      - name: '3. 读取仓库已保存版本'
+        id: local
         shell: bash
         run: |
           set -euo pipefail
-          echo "开始检查版本"
-          echo "官方版本: 5.1.0"
-          echo "仓库版本: 5.0.0"
-          echo "发现新版本"
+          if [[ -f "$VERSION_FILE" ]]; then
+            LOCAL_VERSION="$(tr -d '\r\n[:space:]' < "$VERSION_FILE")"
+          else
+            LOCAL_VERSION='0.0.0'
+            echo "仓库尚无 $VERSION_FILE，首次运行以 $LOCAL_VERSION 比较"
+          fi
+          [[ "$LOCAL_VERSION" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]] || { echo "错误：本地版本号不合法：$LOCAL_VERSION"; exit 1; }
+          echo "local_version=$LOCAL_VERSION" >> "$GITHUB_OUTPUT"
+          echo "仓库已保存版本：$LOCAL_VERSION"
 
-      - name: "4. 测试实时日志"
+      - name: '4. 读取官方 FPK 版本列表'
+        id: remote
         shell: bash
         run: |
-          for i in {1..10}; do
-            echo "$(date '+%F %T') | 执行进度 $i/10"
-            sleep 2
+          set -euo pipefail
+          echo "正在访问：$SOURCE_URL"
+          curl --fail --location --show-error --silent --retry 3 --connect-timeout 15 --max-time 90 "$SOURCE_URL" -o /tmp/zfile-index.html
+          python3 - <<'PY'
+          import os, re
+          from pathlib import Path
+          html = Path('/tmp/zfile-index.html').read_text(encoding='utf-8', errors='replace')
+          names = set(re.findall(r'zfile-pro-(\d+\.\d+\.\d+)-fnos-(x86|arm)\.fpk', html, re.I))
+          versions = {}
+          for ver, arch in names:
+              versions.setdefault(ver, set()).add(arch.lower())
+          print('官方目录检测到以下版本：', flush=True)
+          for ver in sorted(versions, key=lambda s: tuple(map(int, s.split('.')))):
+              print(f'  {ver}: {", ".join(sorted(versions[ver]))}', flush=True)
+          complete = [v for v, arches in versions.items() if {'x86', 'arm'} <= arches]
+          if not complete:
+              raise SystemExit('错误：官方目录没有同时提供 x86 和 arm 的同版本 FPK；请确认目录索引是否可直接读取')
+          latest = max(complete, key=lambda s: tuple(map(int, s.split('.'))))
+          with open(os.environ['GITHUB_OUTPUT'], 'a', encoding='utf-8') as f:
+              f.write(f'remote_version={latest}\n')
+          print(f'官方最新双架构版本：{latest}', flush=True)
+          PY
+
+      - name: '5. 比较版本并决定是否更新'
+        id: compare
+        shell: bash
+        env:
+          LOCAL_VERSION: ${{ steps.local.outputs.local_version }}
+          REMOTE_VERSION: ${{ steps.remote.outputs.remote_version }}
+        run: |
+          set -euo pipefail
+          echo "本地版本：$LOCAL_VERSION"
+          echo "官方版本：$REMOTE_VERSION"
+          if [[ "$DEBUG_MODE" == 'true' ]]; then
+            echo 'need_update=true' >> "$GITHUB_OUTPUT"
+            echo 'Debug 模式：继续执行下载和校验，不进行发布'
+          elif [[ "$(printf '%s\n' "$LOCAL_VERSION" "$REMOTE_VERSION" | sort -V | tail -n1)" == "$LOCAL_VERSION" ]]; then
+            echo 'need_update=false' >> "$GITHUB_OUTPUT"
+            echo '官方版本未高于已保存版本，本次无需更新'
+          else
+            echo 'need_update=true' >> "$GITHUB_OUTPUT"
+            echo '发现新版本，准备同步官方 FPK'
+          fi
+
+      - name: '6. 检查官方 x86 和 arm 下载地址'
+        if: steps.compare.outputs.need_update == 'true'
+        shell: bash
+        env:
+          VERSION: ${{ steps.remote.outputs.remote_version }}
+        run: |
+          set -euo pipefail
+          for arch in x86 arm; do
+            url="${SOURCE_URL}zfile-pro-${VERSION}-fnos-${arch}.fpk"
+            echo "检查 $arch：$url"
+            curl --fail --location --silent --show-error --retry 2 --range 0-0 --max-time 60 --output /dev/null "$url"
+            echo "$arch 下载地址可访问"
           done
-          echo "实时日志测试完成"
 
-      - name: "5. 输出最终结果"
+      - name: '7. 下载官方 x86 FPK'
+        if: steps.compare.outputs.need_update == 'true'
+        shell: bash
+        env:
+          VERSION: ${{ steps.remote.outputs.remote_version }}
+        run: |
+          set -euo pipefail
+          file="zfile-pro-${VERSION}-fnos-x86.fpk"
+          echo "开始下载 $file"
+          curl --fail --location --show-error --retry 3 --connect-timeout 15 --progress-bar "${SOURCE_URL}${file}" -o "$PACKAGE_DIR/$file"
+          test -s "$PACKAGE_DIR/$file"
+          ls -lh "$PACKAGE_DIR/$file"
+          echo 'x86 下载成功'
+
+      - name: '8. 下载官方 arm FPK'
+        if: steps.compare.outputs.need_update == 'true'
+        shell: bash
+        env:
+          VERSION: ${{ steps.remote.outputs.remote_version }}
+        run: |
+          set -euo pipefail
+          file="zfile-pro-${VERSION}-fnos-arm.fpk"
+          echo "开始下载 $file"
+          curl --fail --location --show-error --retry 3 --connect-timeout 15 --progress-bar "${SOURCE_URL}${file}" -o "$PACKAGE_DIR/$file"
+          test -s "$PACKAGE_DIR/$file"
+          ls -lh "$PACKAGE_DIR/$file"
+          echo 'arm 下载成功'
+
+      - name: '9. 校验双架构文件与 SHA256'
+        if: steps.compare.outputs.need_update == 'true'
+        id: verify
+        shell: bash
+        env:
+          VERSION: ${{ steps.remote.outputs.remote_version }}
+        run: |
+          set -euo pipefail
+          for arch in x86 arm; do
+            file="zfile-pro-${VERSION}-fnos-${arch}.fpk"
+            test -s "$PACKAGE_DIR/$file"
+            echo "本地 SHA256：$file"
+            sha256sum "$PACKAGE_DIR/$file"
+            echo "文件大小：$(stat -c%s "$PACKAGE_DIR/$file") 字节"
+            # 官方校验文件存在时可另行增加对照；当前只输出本地摘要，不冒充官方校验通过。
+          done
+          echo '两个架构的文件均存在且非空；已生成本地 SHA256'
+
+      - name: '10. Debug 模式输出验证结果'
+        if: steps.compare.outputs.need_update == 'true' && env.DEBUG_MODE == 'true'
+        shell: bash
+        run: |
+          set -euo pipefail
+          echo 'Debug 模式：只检查官方包，不创建 Release、不修改 FnDepot、不提交版本号'
+          find "$PACKAGE_DIR" -maxdepth 1 -type f -name '*.fpk' -printf '%f (%s bytes)\n' | sort
+          echo 'Debug 验证完成'
+
+      - name: '11. 检查 GitHub Release 是否已存在'
+        if: steps.compare.outputs.need_update == 'true' && env.DEBUG_MODE == 'false'
+        id: release_check
+        shell: bash
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          VERSION: ${{ steps.remote.outputs.remote_version }}
+        run: |
+          set -euo pipefail
+          tag="v${VERSION}-fnos"
+          echo "检查 Release 标签：$tag"
+          if gh release view "$tag" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
+            echo 'exists=true' >> "$GITHUB_OUTPUT"
+            echo 'Release 已存在；不会覆盖官方包'
+          else
+            echo 'exists=false' >> "$GITHUB_OUTPUT"
+            echo 'Release 尚不存在，后续创建'
+          fi
+
+      - name: '12. 创建 GitHub Release 并上传双架构 FPK'
+        if: steps.compare.outputs.need_update == 'true' && env.DEBUG_MODE == 'false' && steps.release_check.outputs.exists == 'false'
+        shell: bash
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          VERSION: ${{ steps.remote.outputs.remote_version }}
+        run: |
+          set -euo pipefail
+          tag="v${VERSION}-fnos"
+          x86="$PACKAGE_DIR/zfile-pro-${VERSION}-fnos-x86.fpk"
+          arm="$PACKAGE_DIR/zfile-pro-${VERSION}-fnos-arm.fpk"
+          echo "开始创建 $tag"
+          gh release create "$tag" "$x86" "$arm" \
+            --repo "$GITHUB_REPOSITORY" \
+            --title "ZFile 官方 fnOS FPK v${VERSION}" \
+            --notes "转存官方原始 fnOS FPK（x86、arm），未重新打包。官方来源：${SOURCE_URL}" \
+            --latest
+          echo 'GitHub Release 创建成功'
+
+      - name: '13. 克隆 FnDepot 并更新双架构包'
+        if: steps.compare.outputs.need_update == 'true' && env.DEBUG_MODE == 'false'
+        shell: bash
+        env:
+          GH_TOKEN: ${{ secrets.FnDepot_PAT }}
+          VERSION: ${{ steps.remote.outputs.remote_version }}
+        run: |
+          set -euo pipefail
+          [[ -n "$GH_TOKEN" ]] || { echo '错误：缺少 FnDepot_PAT Secret'; exit 1; }
+          echo '开始克隆 FnDepot（令牌不输出到日志）'
+          rm -rf /tmp/FnDepot
+          gh repo clone "$FNDEPOT_REPO" /tmp/FnDepot -- --branch "$FNDEPOT_BRANCH" --depth 1
+          target="/tmp/FnDepot/$FNDEPOT_APP_DIR"
+          mkdir -p "$target/x86" "$target/arm"
+          for arch in x86 arm; do
+            src="$PACKAGE_DIR/zfile-pro-${VERSION}-fnos-${arch}.fpk"
+            dst="$target/$arch/${APP_ID}-${arch}-v${VERSION}.fpk"
+            cp "$src" "$dst"
+            echo "FnDepot 已准备：${dst#/tmp/FnDepot/}"
+          done
+          echo 'FnDepot 文件准备完成'
+
+      - name: '14. 更新 FnDepot V2 fnpack.json'
+        if: steps.compare.outputs.need_update == 'true' && env.DEBUG_MODE == 'false'
+        shell: bash
+        env:
+          VERSION: ${{ steps.remote.outputs.remote_version }}
+        run: |
+          set -euo pipefail
+          json=/tmp/FnDepot/fnpack.json
+          test -f "$json"
+          jq -e --arg app "$APP_ID" '.schema_version == "2" and (.apps[$app] | type == "object")' "$json" >/dev/null
+          x86="/tmp/FnDepot/$FNDEPOT_APP_DIR/x86/${APP_ID}-x86-v${VERSION}.fpk"
+          arm="/tmp/FnDepot/$FNDEPOT_APP_DIR/arm/${APP_ID}-arm-v${VERSION}.fpk"
+          jq --arg app "$APP_ID" --arg ver "$VERSION" \
+             --arg x86_url "./${FNDEPOT_APP_DIR}/x86/${APP_ID}-x86-v${VERSION}.fpk" \
+             --arg arm_url "./${FNDEPOT_APP_DIR}/arm/${APP_ID}-arm-v${VERSION}.fpk" \
+             --arg x86_sha "$(sha256sum "$x86" | cut -d' ' -f1)" \
+             --arg arm_sha "$(sha256sum "$arm" | cut -d' ' -f1)" \
+             --argjson x86_size "$(stat -c%s "$x86")" \
+             --argjson arm_size "$(stat -c%s "$arm")" '
+             .apps[$app].releases = (.apps[$app].releases // {}) |
+             .apps[$app].platform = ["x86", "arm"] |
+             .apps[$app].releases[$ver] = {
+               "changelog": ("ZFile 官方 fnOS FPK " + $ver),
+               "packages": {
+                 "x86": {"download_url": $x86_url, "size": $x86_size, "sha256": $x86_sha},
+                 "arm": {"download_url": $arm_url, "size": $arm_size, "sha256": $arm_sha}
+               }
+             }
+          ' "$json" > "$json.tmp"
+          jq -e --arg app "$APP_ID" --arg ver "$VERSION" '.apps[$app].releases[$ver].packages | has("x86") and has("arm")' "$json.tmp" >/dev/null
+          mv "$json.tmp" "$json"
+          echo "FnDepot V2 元数据已更新：$VERSION"
+
+      - name: '15. 提交 FnDepot 更新'
+        if: steps.compare.outputs.need_update == 'true' && env.DEBUG_MODE == 'false'
+        shell: bash
+        env:
+          GH_TOKEN: ${{ secrets.FnDepot_PAT }}
+          VERSION: ${{ steps.remote.outputs.remote_version }}
+        run: |
+          set -euo pipefail
+          cd /tmp/FnDepot
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git add "$FNDEPOT_APP_DIR" fnpack.json
+          if git diff --cached --quiet; then
+            echo 'FnDepot 无文件变化，跳过提交'
+          else
+            git commit -m "chore: 同步 ZFile 官方 fnOS FPK v${VERSION}"
+            git push origin "HEAD:$FNDEPOT_BRANCH"
+            echo 'FnDepot 推送成功'
+          fi
+
+      - name: '16. 保存官方版本号到当前仓库'
+        if: steps.compare.outputs.need_update == 'true' && env.DEBUG_MODE == 'false'
+        shell: bash
+        env:
+          VERSION: ${{ steps.remote.outputs.remote_version }}
+        run: |
+          set -euo pipefail
+          printf '%s\n' "$VERSION" > "$VERSION_FILE"
+          git add "$VERSION_FILE"
+          if git diff --cached --quiet; then
+            echo "版本文件无变化：$VERSION"
+          else
+            git commit -m "chore: 记录 ZFile 官方版本 $VERSION"
+            git push origin "HEAD:$GITHUB_REF_NAME"
+            echo "已将版本号 $VERSION 保存到 $VERSION_FILE"
+          fi
+
+      - name: '17. 输出最终运行结果'
         if: always()
         shell: bash
+        env:
+          LOCAL_VERSION: ${{ steps.local.outputs.local_version }}
+          REMOTE_VERSION: ${{ steps.remote.outputs.remote_version }}
+          NEED_UPDATE: ${{ steps.compare.outputs.need_update }}
         run: |
-          echo "工作流执行结束"
-          echo "状态: ${{ job.status }}"
+          echo '========== ZFile 监控结果 =========='
+          echo "Job 状态：${{ job.status }}"
+          echo "运行模式：$DEBUG_MODE"
+          echo "已保存版本：${LOCAL_VERSION:-未知}"
+          echo "官方版本：${REMOTE_VERSION:-读取失败}"
+          echo "是否执行更新：${NEED_UPDATE:-未判断}"
+          echo "运行编号：$GITHUB_RUN_ID"
+          echo '===================================='
